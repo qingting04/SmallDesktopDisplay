@@ -34,7 +34,7 @@ WiFiManager wm;
 #if DHT_EN
 #include "DHT.h"
 #define DHTPIN  12
-#define DHTTYPE DHT11
+#define DHTTYPE DHT22
 DHT dht(DHTPIN,DHTTYPE);
 #endif
 
