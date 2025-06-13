@@ -1,6 +1,6 @@
 #define Version  "SDD V2.0"
 
-// 内存优化编译选项
+// 编译器优化，减少代码体积
 #pragma GCC optimize("Os")
 
 #include "ArduinoJson.h"
@@ -13,7 +13,7 @@
 #include <TFT_eSPI.h> 
 #include <SPI.h>
 #include <TJpg_Decoder.h>
-#include <LittleFS.h>  // 使用LittleFS替代SPIFFS节省内存
+#include <LittleFS.h>  
 #include "qr.h"
 #include "number.h"
 #include "weathernum.h"
@@ -23,7 +23,7 @@
 #define BLINKER_ALIGENIE_SENSOR
 #include <Blinker.h>
 
-// 配置标志 - 保留全部功能
+// 功能开关 - 可根据需要关闭功能来节省内存
 #define WM_EN   1
 #define WebSever_EN  1
 #define DHT_EN  1
@@ -120,15 +120,16 @@ bool loadConfig();
 bool saveConfig();
 void resetConfig();
 
-// 配置文件管理 - 使用LittleFS
+// 配置文件管理
 bool loadConfig() {
   if (!LittleFS.begin()) {
-    Serial.println(F("LittleFS Mount Failed"));
+    Serial.println("LittleFS Mount Failed");
     return false;
   }
   
   if (!LittleFS.exists("/config.json")) {
-    Serial.println(F("Config file not found, using defaults"));
+    Serial.println("Config file not found, using defaults");
+    // 设置默认值
     config.blinker_auth = "";
     config.city_code = "101250101";
     config.lcd_brightness = 50;
@@ -141,7 +142,7 @@ bool loadConfig() {
   
   File configFile = LittleFS.open("/config.json", "r");
   if (!configFile) {
-    Serial.println(F("Failed to open config file"));
+    Serial.println("Failed to open config file");
     return false;
   }
   
@@ -159,7 +160,7 @@ bool loadConfig() {
   config.dht_enabled = doc["dht_enabled"] | 0;
   config.show_animation = doc["show_animation"] | 1;
   
-  Serial.println(F("Config loaded successfully"));
+  Serial.println("Config loaded successfully");
   return true;
 }
 
@@ -176,21 +177,21 @@ bool saveConfig() {
   
   File configFile = LittleFS.open("/config.json", "w");
   if (!configFile) {
-    Serial.println(F("Failed to open config file for writing"));
+    Serial.println("Failed to open config file for writing");
     return false;
   }
   
   serializeJson(doc, configFile);
   configFile.close();
   
-  Serial.println(F("Config saved successfully"));
+  Serial.println("Config saved successfully");
   return true;
 }
 
 void resetConfig() {
   if (LittleFS.exists("/config.json")) {
     LittleFS.remove("/config.json");
-    Serial.println(F("Config file deleted"));
+    Serial.println("Config file deleted");
   }
 }
 
@@ -249,7 +250,7 @@ void loading(byte delayTime) {
   clk.fillRoundRect(3,3,loadNum,10,5,0xFFFF);
   clk.setTextDatum(CC_DATUM);
   clk.setTextColor(TFT_GREEN, 0x0000); 
-  clk.drawString(F("Connecting to WiFi......"),100,40,2);
+  clk.drawString("Connecting to WiFi......",100,40,2);
   clk.setTextColor(TFT_WHITE, 0x0000); 
   clk.drawRightString(Version,180,60,2);
   clk.pushSprite(20,120);
@@ -283,6 +284,7 @@ void tempWin() {
 void IndoorTem() {
   float t = dht.readTemperature();
   float h = dht.readHumidity();
+  String s = "内温";
   
   clk.setColorDepth(8);
   clk.loadFont(ZdyLwFont_20);
@@ -291,7 +293,7 @@ void IndoorTem() {
   clk.fillSprite(bgColor);
   clk.setTextDatum(CC_DATUM);
   clk.setTextColor(TFT_WHITE, bgColor);
-  clk.drawString(F("内温"),29,16);
+  clk.drawString(s,29,16);
   clk.pushSprite(172,150);
   clk.deleteSprite();
   
@@ -300,7 +302,7 @@ void IndoorTem() {
   clk.setTextDatum(CC_DATUM);
   clk.setTextColor(TFT_WHITE, bgColor); 
   clk.drawFloat(t,1,20,13);
-  clk.drawString(F("℃"),50,13);
+  clk.drawString("℃",50,13);
   clk.pushSprite(170,184);
   clk.deleteSprite();
   
@@ -309,7 +311,7 @@ void IndoorTem() {
   clk.setTextDatum(CC_DATUM);
   clk.setTextColor(TFT_WHITE, bgColor); 
   clk.drawFloat(h,1,20,13);
-  clk.drawString(F("%"),50,13);
+  clk.drawString("%",50,13);
   clk.pushSprite(170,214);
   clk.deleteSprite();
 }
@@ -319,13 +321,13 @@ void IndoorTem() {
 void SmartConfig(void) {
   WiFi.mode(WIFI_STA);
   tft.pushImage(0, 0, 240, 240, qr);
-  Serial.println(F("\r\nWait for Smartconfig..."));
+  Serial.println("\r\nWait for Smartconfig...");
   WiFi.beginSmartConfig();
   while (1) {
-    Serial.print(F("."));
+    Serial.print(".");
     delay(100);
     if (WiFi.smartConfigDone()) {
-    Serial.println(F("SmartConfig Success"));
+    Serial.println("SmartConfig Success");
     Serial.printf("SSID:%s\r\n", WiFi.SSID().c_str());
     Serial.printf("PSW:%s\r\n", WiFi.psk().c_str());
     break;
@@ -335,7 +337,7 @@ void SmartConfig(void) {
 }
 #endif
 
-// Web服务器功能 - 使用F()宏优化内存
+// Web服务器功能
 #if WebSever_EN
 void handleconfig() {
   String msg = "";
@@ -359,7 +361,7 @@ void handleconfig() {
     if (new_blinker_auth.length() > 0 && new_blinker_auth != config.blinker_auth) {
       config.blinker_auth = new_blinker_auth;
       configChanged = true;
-      msg += F("Blinker密钥已更新<br>");
+      msg += "Blinker密钥已更新<br>";
       Serial.println("Blinker Auth: " + config.blinker_auth);
     }
     
@@ -368,7 +370,7 @@ void handleconfig() {
     if (cc >= 101000000 && cc <= 102000000) {
       config.city_code = new_city_code;
       configChanged = true;
-      msg += F("城市代码已更新<br>");
+      msg += "城市代码已更新<br>";
       Serial.println("City Code: " + config.city_code);
     }
     
@@ -377,7 +379,7 @@ void handleconfig() {
       config.lcd_brightness = new_brightness;
       analogWrite(LCD_BL_PIN, 1023 - (config.lcd_brightness * 10));
       configChanged = true;
-      msg += F("亮度已调整<br>");
+      msg += "亮度已调整<br>";
       Serial.println("Brightness: " + String(config.lcd_brightness));
     }
     
@@ -385,7 +387,7 @@ void handleconfig() {
     if (new_update_time > 0 && new_update_time <= 60) {
       config.weather_update_time = new_update_time;
       configChanged = true;
-      msg += F("天气更新时间已设置<br>");
+      msg += "天气更新时间已设置<br>";
       Serial.println("Update Time: " + String(config.weather_update_time));
     }
 
@@ -393,7 +395,7 @@ void handleconfig() {
     if (new_animation != config.show_animation) {
       config.show_animation = new_animation;
       configChanged = true;
-      msg += F("显示模式已切换<br>");
+      msg += "显示模式已切换<br>";
       tft.fillScreen(0x0000);
       LCD_reflash(1);
       UpdateWeater_en = 1;
@@ -406,7 +408,7 @@ void handleconfig() {
     if (new_dht_enabled != config.dht_enabled) {
       config.dht_enabled = new_dht_enabled;
       configChanged = true;
-      msg += F("DHT传感器设置已更新<br>");
+      msg += "DHT传感器设置已更新<br>";
       tft.fillScreen(0x0000);
       LCD_reflash(1);
       UpdateWeater_en = 1;
@@ -418,7 +420,7 @@ void handleconfig() {
     if (new_rotation != config.lcd_rotation) {
       config.lcd_rotation = new_rotation;
       configChanged = true;
-      msg += F("屏幕方向已调整<br>");
+      msg += "屏幕方向已调整<br>";
       tft.setRotation(config.lcd_rotation);
       tft.fillScreen(0x0000);
       LCD_reflash(1);
@@ -430,133 +432,103 @@ void handleconfig() {
     // 如果配置有更改则保存
     if (configChanged) {
       if (saveConfig()) {
-        msg += F("配置已保存！<br>");
+        msg += "配置已保存！<br>";
         
         // 如果认证密钥有更改则重启Blinker
         if (config.blinker_auth.length() > 0) {
-          msg += F("正在重新初始化Blinker...<br>");
+          msg += "正在重新初始化Blinker...<br>";
         }
       } else {
-        msg += F("配置保存失败！<br>");
+        msg += "配置保存失败！<br>";
       }
     }
   }
 
-  // 分段发送Web界面以节省RAM
-  server.setContentLength(CONTENT_LENGTH_UNKNOWN);
-  server.send(200, F("text/html"), "");
+  // 简化的Web界面以节省内存
+  String content = F("<html><head><meta charset='UTF-8'>");
+  content += F("<meta name='viewport' content='width=device-width, initial-scale=1.0'>");
+  content += F("<title>桌面显示器配置</title>");
+  content += F("<style>body{font-family:Arial;margin:20px;background:#f0f0f0}");
+  content += F(".container{max-width:400px;margin:auto;background:white;padding:20px;border-radius:10px}");
+  content += F("input[type='text']{width:100%;padding:8px;margin:5px 0;border:1px solid #ddd;border-radius:4px}");
+  content += F("input[type='submit']{width:100%;padding:10px;background:#007cba;color:white;border:none;border-radius:4px;margin-top:10px}");
+  content += F(".group{margin:15px 0;padding:10px;border:1px solid #eee;border-radius:5px}");
+  content += F("label{font-weight:bold;margin-bottom:5px;display:block}</style></head><body>");
   
-  server.sendContent(F("<!DOCTYPE html><html><head><meta charset='UTF-8'>"));
-  server.sendContent(F("<meta name='viewport' content='width=device-width,initial-scale=1.0'>"));
-  server.sendContent(F("<title>小型桌面显示器配置</title>"));
-  server.sendContent(F("<style>*{box-sizing:border-box}"));
-  server.sendContent(F("body{background:linear-gradient(135deg,#667eea 0%,#764ba2 100%);color:#fff;font-family:'Segoe UI',Arial,sans-serif;margin:0;padding:20px;min-height:100vh}"));
-  server.sendContent(F(".container{max-width:500px;margin:0 auto;background:rgba(255,255,255,0.1);padding:30px;border-radius:15px;backdrop-filter:blur(10px);box-shadow:0 8px 32px rgba(0,0,0,0.3)}"));
-  server.sendContent(F("h2{text-align:center;margin-bottom:30px;font-size:24px}"));
-  server.sendContent(F(".group{margin:20px 0;padding:15px;background:rgba(255,255,255,0.05);border-radius:10px;border:1px solid rgba(255,255,255,0.1)}"));
-  server.sendContent(F("label{display:block;margin-bottom:8px;font-weight:600}"));
-  server.sendContent(F("input[type='text']{width:100%;padding:12px;border:none;border-radius:8px;background:rgba(255,255,255,0.9);color:#333;font-size:14px}"));
-  server.sendContent(F("input[type='radio']{margin:8px 8px 8px 0;transform:scale(1.2)}"));
-  server.sendContent(F(".radio-group{display:flex;flex-wrap:wrap;gap:15px;margin-top:10px}"));
-  server.sendContent(F(".radio-option{display:flex;align-items:center}"));
-  server.sendContent(F("input[type='submit']{width:100%;padding:15px;background:linear-gradient(45deg,#fff,#f0f0f0);color:#333;border:none;border-radius:10px;font-size:16px;font-weight:bold;cursor:pointer;transition:all 0.3s ease}"));
-  server.sendContent(F("input[type='submit']:hover{transform:translateY(-2px);box-shadow:0 5px 15px rgba(0,0,0,0.2)}"));
-  server.sendContent(F(".message{background:rgba(76,175,80,0.2);border:1px solid rgba(76,175,80,0.5);padding:10px;border-radius:5px;margin:10px 0}"));
-  server.sendContent(F(".status{text-align:center;margin-top:20px;font-size:12px;opacity:0.8}"));
-  server.sendContent(F("</style></head><body>"));
-  
-  server.sendContent(F("<div class='container'>"));
-  server.sendContent(F("<h2>🖥️ 小型桌面显示器配置</h2>"));
+  content += F("<div class='container'><h2>🖥️ 配置</h2>");
   
   if (msg.length() > 0) {
-    server.sendContent(F("<div class='message'>"));
-    server.sendContent(msg);
-    server.sendContent(F("</div>"));
+    content += F("<div style='background:#d4edda;padding:10px;border-radius:5px;margin:10px 0'>");
+    content += msg;
+    content += F("</div>");
   }
   
-  server.sendContent(F("<form action='/' method='POST'>"));
+  content += F("<form action='/' method='POST'>");
   
-  server.sendContent(F("<div class='group'>"));
-  server.sendContent(F("<label>🔑 Blinker密钥 (天猫精灵):</label>"));
-  server.sendContent(F("<input type='text' name='web_blinker_auth' placeholder='从Blinker APP获取设备密钥' value='"));
-  server.sendContent(config.blinker_auth);
-  server.sendContent(F("'></div>"));
+  content += F("<div class='group'><label>🔑 Blinker密钥:</label>");
+  content += F("<input type='text' name='web_blinker_auth' placeholder='从APP获取' value='");
+  content += config.blinker_auth;
+  content += F("'></div>");
   
-  server.sendContent(F("<div class='group'>"));
-  server.sendContent(F("<label>🏙️ 城市代码:</label>"));
-  server.sendContent(F("<input type='text' name='web_ccode' placeholder='例如: 101250101 (长沙)' value='"));
-  server.sendContent(config.city_code);
-  server.sendContent(F("'></div>"));
+  content += F("<div class='group'><label>🏙️ 城市代码:</label>");
+  content += F("<input type='text' name='web_ccode' placeholder='101250101' value='");
+  content += config.city_code;
+  content += F("'></div>");
   
-  server.sendContent(F("<div class='group'>"));
-  server.sendContent(F("<label>💡 屏幕亮度 (1-100):</label>"));
-  server.sendContent(F("<input type='text' name='web_bl' placeholder='50' value='"));
-  server.sendContent(String(config.lcd_brightness));
-  server.sendContent(F("'></div>"));
+  content += F("<div class='group'><label>💡 亮度 (1-100):</label>");
+  content += F("<input type='text' name='web_bl' value='");
+  content += String(config.lcd_brightness);
+  content += F("'></div>");
   
-  server.sendContent(F("<div class='group'>"));
-  server.sendContent(F("<label>⏰ 天气更新间隔 (分钟):</label>"));
-  server.sendContent(F("<input type='text' name='web_upwe_t' placeholder='10' value='"));
-  server.sendContent(String(config.weather_update_time));
-  server.sendContent(F("'></div>"));
+  content += F("<div class='group'><label>⏰ 更新间隔 (分钟):</label>");
+  content += F("<input type='text' name='web_upwe_t' value='");
+  content += String(config.weather_update_time);
+  content += F("'></div>");
   
-  server.sendContent(F("<div class='group'>"));
-  server.sendContent(F("<label>🎭 右下角显示:</label>"));
-  server.sendContent(F("<div class='radio-group'>"));
-  server.sendContent(F("<div class='radio-option'><input type='radio' name='web_animation' value='1'"));
-  if (config.show_animation) server.sendContent(F(" checked"));
-  server.sendContent(F("> 🚀 动画</div>"));
-  server.sendContent(F("<div class='radio-option'><input type='radio' name='web_animation' value='0'"));
-  if (!config.show_animation) server.sendContent(F(" checked"));
-  server.sendContent(F("> 🌡️ 室内温度</div>"));
-  server.sendContent(F("</div></div>"));
+  content += F("<div class='group'><label>🎭 显示:</label>");
+  content += F("<input type='radio' name='web_animation' value='1'");
+  content += (config.show_animation ? F(" checked") : F(""));
+  content += F("> 动画 ");
+  content += F("<input type='radio' name='web_animation' value='0'");
+  content += (!config.show_animation ? F(" checked") : F(""));
+  content += F("> 室内温度</div>");
   
   #if DHT_EN
-  server.sendContent(F("<div class='group'>"));
-  server.sendContent(F("<label>🌡️ DHT11传感器:</label>"));
-  server.sendContent(F("<div class='radio-group'>"));
-  server.sendContent(F("<div class='radio-option'><input type='radio' name='web_DHT11_en' value='0'"));
-  if (!config.dht_enabled) server.sendContent(F(" checked"));
-  server.sendContent(F("> 禁用</div>"));
-  server.sendContent(F("<div class='radio-option'><input type='radio' name='web_DHT11_en' value='1'"));
-  if (config.dht_enabled) server.sendContent(F(" checked"));
-  server.sendContent(F("> 启用</div>"));
-  server.sendContent(F("</div></div>"));
+  content += F("<div class='group'><label>🌡️ DHT传感器:</label>");
+  content += F("<input type='radio' name='web_DHT11_en' value='0'");
+  content += (!config.dht_enabled ? F(" checked") : F(""));
+  content += F("> 禁用 ");
+  content += F("<input type='radio' name='web_DHT11_en' value='1'");
+  content += (config.dht_enabled ? F(" checked") : F(""));
+  content += F("> 启用</div>");
   #endif
   
-  server.sendContent(F("<div class='group'>"));
-  server.sendContent(F("<label>🔄 屏幕方向:</label>"));
-  server.sendContent(F("<div class='radio-group'>"));
-  server.sendContent(F("<div class='radio-option'><input type='radio' name='web_set_rotation' value='0'"));
-  if (config.lcd_rotation == 0) server.sendContent(F(" checked"));
-  server.sendContent(F("> USB朝下</div>"));
-  server.sendContent(F("<div class='radio-option'><input type='radio' name='web_set_rotation' value='1'"));
-  if (config.lcd_rotation == 1) server.sendContent(F(" checked"));
-  server.sendContent(F("> USB朝右</div>"));
-  server.sendContent(F("<div class='radio-option'><input type='radio' name='web_set_rotation' value='2'"));
-  if (config.lcd_rotation == 2) server.sendContent(F(" checked"));
-  server.sendContent(F("> USB朝上</div>"));
-  server.sendContent(F("<div class='radio-option'><input type='radio' name='web_set_rotation' value='3'"));
-  if (config.lcd_rotation == 3) server.sendContent(F(" checked"));
-  server.sendContent(F("> USB朝左</div>"));
-  server.sendContent(F("</div></div>"));
+  content += F("<div class='group'><label>🔄 屏幕方向:</label>");
+  content += F("<input type='radio' name='web_set_rotation' value='0'");
+  content += (config.lcd_rotation == 0 ? F(" checked") : F(""));
+  content += F("> USB朝下 ");
+  content += F("<input type='radio' name='web_set_rotation' value='1'");
+  content += (config.lcd_rotation == 1 ? F(" checked") : F(""));
+  content += F("> USB朝右<br>");
+  content += F("<input type='radio' name='web_set_rotation' value='2'");
+  content += (config.lcd_rotation == 2 ? F(" checked") : F(""));
+  content += F("> USB朝上 ");
+  content += F("<input type='radio' name='web_set_rotation' value='3'");
+  content += (config.lcd_rotation == 3 ? F(" checked") : F(""));
+  content += F("> USB朝左</div>");
   
-  server.sendContent(F("<input type='submit' value='💾 保存设置'>"));
-  server.sendContent(F("</form>"));
+  content += F("<input type='submit' value='💾 保存设置'></form>");
+  content += F("<p style='text-align:center;font-size:12px'>IP: ");
+  content += WiFi.localIP().toString();
+  content += F("</p></div></body></html>");
   
-  server.sendContent(F("<div class='status'>"));
-  server.sendContent(F("💬 支持天猫精灵语音控制 | IP: "));
-  server.sendContent(WiFi.localIP().toString());
-  server.sendContent(F("</div>"));
-  
-  server.sendContent(F("</div></body></html>"));
-  server.sendContent("");
+  server.send(200, "text/html", content);
 }
 
 void handleReset() {
   resetConfig();
   String content = F("<html><head><meta charset='UTF-8'><meta http-equiv='refresh' content='3;url=/'></head>");
-  content += F("<body style='background:#667eea;color:#fff;text-align:center;font-family:Arial;padding:50px;'>");
+  content += F("<body style='text-align:center;font-family:Arial;padding:50px'>");
   content += F("<h2>配置已重置</h2><p>3秒后自动跳转...</p></body></html>");
   server.send(200, "text/html", content);
   delay(100);
@@ -583,21 +555,21 @@ void handleNotFound() {
 
 void Web_Sever_Init() {
   uint32_t counttime = 0;
-  Serial.println(F("mDNS responder building..."));
+  Serial.println("mDNS responder building...");
   counttime = millis();
   while (!MDNS.begin("sdd")) {
     if(millis() - counttime > 30000) ESP.restart();
   }
 
-  Serial.println(F("mDNS responder started"));
+  Serial.println("mDNS responder started");
   server.on("/", handleconfig);
   server.on("/reset", handleReset);
   server.onNotFound(handleNotFound);
   server.begin();
-  Serial.println(F("HTTP服务器已开启"));
-  Serial.println(F("配置页面: http://sdd.local"));
-  Serial.println(F("重置配置: http://sdd.local/reset"));
-  Serial.print(F("本地IP： "));
+  Serial.println("HTTP服务器已开启");
+  Serial.println("配置页面: http://sdd.local");
+  Serial.println("重置配置: http://sdd.local/reset");
+  Serial.print("本地IP： ");
   Serial.println(WiFi.localIP());
   MDNS.addService("http", "tcp", 80);
 }
@@ -613,12 +585,10 @@ void Web_sever_Win() {
   clk.fillSprite(0x0000);
   clk.setTextDatum(CC_DATUM);
   clk.setTextColor(TFT_GREEN, 0x0000); 
-  clk.drawString(F("配置页面已开启"),100,15,2);
+  clk.drawString("配置页面已开启",100,15,2);
   clk.setTextColor(TFT_WHITE, 0x0000); 
-  clk.drawString(F("http://sdd.local"),100,35,2);
+  clk.drawString("http://sdd.local",100,35,2);
   clk.drawString("或 " + WiFi.localIP().toString(),100,55,2);
-  clk.setTextColor(TFT_YELLOW, 0x0000);
-  clk.drawString(F("支持天猫精灵控制"),100,70,2);
   clk.pushSprite(20,30);
   clk.deleteSprite();
 }
@@ -631,8 +601,8 @@ void Web_win() {
   clk.fillSprite(0x0000);
   clk.setTextDatum(CC_DATUM);
   clk.setTextColor(TFT_GREEN, 0x0000); 
-  clk.drawString(F("WiFi配网中..."),100,15,2);
-  clk.drawString(F("SSID: SmallDisplay"),100,35,2);
+  clk.drawString("WiFi配网中...",100,15,2);
+  clk.drawString("SSID: SmallDisplay",100,35,2);
   clk.pushSprite(20,50);
   clk.deleteSprite();
 }
@@ -678,7 +648,7 @@ String getParam(String name) {
 }
 
 void saveParamCallback() {
-  Serial.println(F("[CALLBACK] saveParamCallback fired"));
+  Serial.println("[CALLBACK] saveParamCallback fired");
   
   // 从WiFiManager获取参数
   config.blinker_auth = getParam("blinker_auth");
@@ -708,7 +678,7 @@ void saveParamCallback() {
   // 立即应用设置
   analogWrite(LCD_BL_PIN, 1023 - (config.lcd_brightness * 10));
   
-  Serial.println(F("Configuration saved:"));
+  Serial.println("Configuration saved:");
   Serial.println("Blinker Auth: " + config.blinker_auth);
   Serial.println("City Code: " + config.city_code);
   Serial.println("Brightness: " + String(config.lcd_brightness));
@@ -721,8 +691,8 @@ void setup() {
   
   // 初始化文件系统
   if (!LittleFS.begin()) {
-    Serial.println(F("LittleFS Mount Failed"));
-    Serial.println(F("Formatting LittleFS..."));
+    Serial.println("LittleFS Mount Failed");
+    Serial.println("Formatting LittleFS...");
     LittleFS.format();
     LittleFS.begin();
   }
@@ -775,7 +745,7 @@ void setup() {
   }
 
   if(WiFi.status() == WL_CONNECTED) {
-    Serial.println(F("WiFi connected successfully"));
+    Serial.println("WiFi connected successfully");
     
     // 如果有认证密钥则初始化Blinker
     if (config.blinker_auth.length() > 0) {
@@ -790,10 +760,10 @@ void setup() {
       Blinker.begin(auth, ssid_c, pswd_c);
       Blinker.attachData(dataRead);
       BlinkerAliGenie.attachQuery(aligenieQuery);
-      Serial.println(F("Blinker initialized with AliGenie support"));
+      Serial.println("Blinker initialized with AliGenie support");
       Serial.println("Auth: " + config.blinker_auth);
     } else {
-      Serial.println(F("Blinker auth key not configured"));
+      Serial.println("Blinker auth key not configured");
     }
     
     #if WebSever_EN
@@ -803,9 +773,9 @@ void setup() {
     #endif
   }
 
-  Serial.println(F("启动UDP"));
+  Serial.println("启动UDP");
   Udp.begin(localPort);
-  Serial.println(F("等待同步..."));
+  Serial.println("等待同步...");
   setSyncProvider(getNtpTime);
   setSyncInterval(300);
 
@@ -871,7 +841,7 @@ void LCD_reflash(int en) {
   if(millis() - weaterTime > (60000 * config.weather_update_time) || en == 1 || UpdateWeater_en != 0) {
     if(Wifi_en == 0) {
       WiFi.forceSleepWake();
-      Serial.println(F("WIFI恢复......"));
+      Serial.println("WIFI恢复......");
       Wifi_en = 1;
     }
 
@@ -882,7 +852,7 @@ void LCD_reflash(int en) {
       getNtpTime();
       #if !WebSever_EN
       WiFi.forceSleepBegin();
-      Serial.println(F("WIFI休眠......"));
+      Serial.println("WIFI休眠......");
       Wifi_en = 0;
       #endif
     }
@@ -893,12 +863,12 @@ void LCD_reflash(int en) {
 void getCityCode(){
  String URL = "http://wgeo.weather.com.cn/ip/?_="+String(now());
   HTTPClient httpClient;
-  httpClient.begin(wificlient, URL);
-  httpClient.setUserAgent(F("Mozilla/5.0 (iPhone; CPU iPhone OS 11_0 like Mac OS X) AppleWebKit/604.1.38 (KHTML, like Gecko) Version/11.0 Mobile/15A372 Safari/604.1"));
-  httpClient.addHeader(F("Referer"), F("http://www.weather.com.cn/"));
+  httpClient.begin(wificlient, URL);  // 修复：添加wificlient参数
+  httpClient.setUserAgent("Mozilla/5.0 (iPhone; CPU iPhone OS 11_0 like Mac OS X) AppleWebKit/604.1.38 (KHTML, like Gecko) Version/11.0 Mobile/15A372 Safari/604.1");
+  httpClient.addHeader("Referer", "http://www.weather.com.cn/");
   
   int httpCode = httpClient.GET();
-  Serial.print(F("Send GET request to URL: "));
+  Serial.print("Send GET request to URL: ");
   Serial.println(URL);
   
   if (httpCode == HTTP_CODE_OK) {
@@ -910,10 +880,10 @@ void getCityCode(){
        saveConfig();
        getCityWeater();
     } else {
-      Serial.println(F("获取城市代码失败"));  
+      Serial.println("获取城市代码失败");  
     }
   } else {
-    Serial.println(F("请求城市代码错误："));
+    Serial.println("请求城市代码错误：");
     Serial.println(httpCode);
   }
   httpClient.end();
@@ -922,12 +892,12 @@ void getCityCode(){
 void getCityWeater(){
  String URL = "http://d1.weather.com.cn/weather_index/" + config.city_code + ".html?_="+String(now());
   HTTPClient httpClient;
-  httpClient.begin(wificlient, URL);
-  httpClient.setUserAgent(F("Mozilla/5.0 (iPhone; CPU iPhone OS 11_0 like Mac OS X) AppleWebKit/604.1.38 (KHTML, like Gecko) Version/11.0 Mobile/15A372 Safari/604.1"));
-  httpClient.addHeader(F("Referer"), F("http://www.weather.com.cn/"));
+  httpClient.begin(wificlient, URL);  // 修复：添加wificlient参数
+  httpClient.setUserAgent("Mozilla/5.0 (iPhone; CPU iPhone OS 11_0 like Mac OS X) AppleWebKit/604.1.38 (KHTML, like Gecko) Version/11.0 Mobile/15A372 Safari/604.1");
+  httpClient.addHeader("Referer", "http://www.weather.com.cn/");
   
   int httpCode = httpClient.GET();
-  Serial.println(F("正在获取天气数据"));
+  Serial.println("正在获取天气数据");
   Serial.println(URL);
   
   if (httpCode == HTTP_CODE_OK) {
@@ -945,9 +915,9 @@ void getCityWeater(){
     String jsonFC = str.substring(indexStart+5,indexEnd);
     
     weaterData(&jsonCityDZ,&jsonDataSK,&jsonFC);
-    Serial.println(F("获取成功"));
+    Serial.println("获取成功");
   } else {
-    Serial.println(F("请求城市天气错误："));
+    Serial.println("请求城市天气错误：");
     Serial.print(httpCode);
   }
   httpClient.end();
@@ -968,7 +938,7 @@ void weaterData(String *cityDZ,String *dataSK,String *dataFC) {
   clk.fillSprite(bgColor);
   clk.setTextDatum(CC_DATUM);
   clk.setTextColor(TFT_WHITE, bgColor); 
-  clk.drawString(sk["temp"].as<String>()+F("℃"),28,13);
+  clk.drawString(sk["temp"].as<String>()+"℃",28,13);
   clk.pushSprite(100,184);
   clk.deleteSprite();
   tempnum = sk["temp"].as<int>();
@@ -1022,20 +992,20 @@ void weaterData(String *cityDZ,String *dataSK,String *dataFC) {
 
   // 空气质量
   uint16_t pm25BgColor = tft.color565(156,202,127);
-  String aqiTxt = F("优");
+  String aqiTxt = "优";
   int pm25V = sk["aqi"];
   if(pm25V>200){
     pm25BgColor = tft.color565(136,11,32);
-    aqiTxt = F("重度");
+    aqiTxt = "重度";
   }else if(pm25V>150){
     pm25BgColor = tft.color565(186,55,121);
-    aqiTxt = F("中度");
+    aqiTxt = "中度";
   }else if(pm25V>100){
     pm25BgColor = tft.color565(242,159,57);
-    aqiTxt = F("轻度");
+    aqiTxt = "轻度";
   }else if(pm25V>50){
     pm25BgColor = tft.color565(247,219,100);
-    aqiTxt = F("良");
+    aqiTxt = "良";
   }
   clk.createSprite(56, 24); 
   clk.fillSprite(bgColor);
@@ -1047,26 +1017,26 @@ void weaterData(String *cityDZ,String *dataSK,String *dataFC) {
   clk.deleteSprite();
   
   // 设置滚动显示文本
-  scrollText[0] = F("实时天气 ")+sk["weather"].as<String>();
-  scrollText[1] = F("空气质量 ")+aqiTxt;
-  scrollText[2] = F("风向 ")+sk["WD"].as<String>()+sk["WS"].as<String>();
+  scrollText[0] = "实时天气 "+sk["weather"].as<String>();
+  scrollText[1] = "空气质量 "+aqiTxt;
+  scrollText[2] = "风向 "+sk["WD"].as<String>()+sk["WS"].as<String>();
   
   // 解析其他天气信息
   deserializeJson(doc, *cityDZ);
   JsonObject dz = doc.as<JsonObject>();
-  scrollText[3] = F("今日")+dz["weather"].as<String>();
+  scrollText[3] = "今日"+dz["weather"].as<String>();
   
   deserializeJson(doc, *dataFC);
   JsonObject fc = doc.as<JsonObject>();
   
-  scrollText[4] = F("最低温度")+fc["fd"].as<String>()+F("℃");
-  scrollText[5] = F("最高温度")+fc["fc"].as<String>()+F("℃");
+  scrollText[4] = "最低温度"+fc["fd"].as<String>()+"℃";
+  scrollText[5] = "最高温度"+fc["fc"].as<String>()+"℃";
   
   // IP地址信息
   if(WiFi.status() == WL_CONNECTED) {
-    scrollText[6] = F("设备IP ") + WiFi.localIP().toString();
+    scrollText[6] = "设备IP " + WiFi.localIP().toString();
   } else {
-    scrollText[6] = F("WiFi未连接");
+    scrollText[6] = "WiFi未连接";
   }
 
   wrat.printfweather(170,15,atoi((sk["weathercode"].as<String>()).substring(1,3).c_str()));
@@ -1121,7 +1091,7 @@ void imgAnim() {
     case 7: TJpgDec.drawJpg(x,y,i7, sizeof(i7)); break;
     case 8: TJpgDec.drawJpg(x,y,i8, sizeof(i8)); break;
     case 9: TJpgDec.drawJpg(x,y,i9, sizeof(i9)); break;
-    default: Serial.println(F("显示Anim错误")); break;
+    default: Serial.println("显示Anim错误"); break;
   }
 }
 #endif
@@ -1175,14 +1145,14 @@ void digitalClockDisplay(int reflash_en) {
 }
 
 String week() {
-  String wk[7] = {F("日"),F("一"),F("二"),F("三"),F("四"),F("五"),F("六")};
-  String s = F("周") + wk[weekday()-1];
+  String wk[7] = {"日","一","二","三","四","五","六"};
+  String s = "周" + wk[weekday()-1];
   return s;
 }
 
 String monthDay() {
   String s = String(month());
-  s = s + F("月") + day() + F("日");
+  s = s + "月" + day() + "日";
   return s;
 }
 
@@ -1198,7 +1168,7 @@ time_t getNtpTime() {
   while (millis() - beginWait < 1500) {
     int size = Udp.parsePacket();
     if (size >= NTP_PACKET_SIZE) {
-      Serial.println(F("Receive NTP Response"));
+      Serial.println("Receive NTP Response");
       Udp.read(packetBuffer, NTP_PACKET_SIZE);
       unsigned long secsSince1900;
       secsSince1900 =  (unsigned long)packetBuffer[40] << 24;
@@ -1208,7 +1178,7 @@ time_t getNtpTime() {
       return secsSince1900 - 2208988800UL + timeZone * SECS_PER_HOUR;
     }
   }
-  Serial.println(F("No NTP Response :-("));
+  Serial.println("No NTP Response :-(");
   return 0;
 }
 
