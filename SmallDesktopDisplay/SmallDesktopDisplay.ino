@@ -36,6 +36,10 @@
  *                    网页两页的 CSS/JS 抽成共用常量，样式/脚本只存一份（省 4.3KB flash）；
  *                    删掉注释掉的历史代码，按功能加分区标题；
  *                    顺带修串口 0x02 设置城市码时赋给了从未更新的变量（手动设的城市码会被丢掉）。
+ *            V2.5    对时加固：两块设备同网络差几分钟/几十分钟的根因是 NTP 没成功就靠晶振自走。
+ *                    现在按 5 台服务器依次重试并校验回包（模式/层数/时间戳/值域）；
+ *                    天气请求成功后借回包的 Date 头兜底校正（UDP 123 被封也能对时）；
+ *                    /api/status 与状态卡显示设备时间、对时方式与上次对时距今。
  *
  * 文 件 结 构（按顺序）：
  *   库文件/配置位/屏幕坐标/字库 → 参数与状态变量 → EEPROM 存取 → 屏幕绘制
@@ -50,7 +54,7 @@
  * 
  *    感谢群友 @你别失望  提醒发现WiFi保存后无法重置的问题，目前已解决。详情查看更改说明！
  * *****************************************************************/
-#define Version  "SDD V2.4"
+#define Version  "SDD V2.5"
 /* *****************************************************************
  *  库文件、头文件
  * *****************************************************************/
@@ -249,9 +253,20 @@ int humicol =0xffff;   //湿度显示颜色
 //Web网站服务器
 ESP8266WebServer server(80);// 建立esp8266网站服务器对象
 DNSServer dnsServer;// AP模式下的DNS劫持：任何域名都解析到本机，手机连上热点即可自动弹出配网页
-//NTP服务器参数
-static const char ntpServerName[] = "ntp6.aliyun.com";
+//NTP服务器参数：按顺序试，某个域名解析失败或不通就换下一个
+static const char *const NTP_SERVERS[] = {
+  "ntp6.aliyun.com", "ntp.aliyun.com", "cn.pool.ntp.org", "time.cloudflare.com", "pool.ntp.org"
+};
+const uint8_t NTP_SERVER_N = sizeof(NTP_SERVERS) / sizeof(NTP_SERVERS[0]);
+uint8_t ntpSrvIdx = 0;      //下一轮从哪台开始试（成功过的那台下次优先）
 const int timeZone = 8;     //东八区
+//对时状态（供 /api/status 排查“两块表差几分钟”这类问题）
+uint32_t clkOkAt   = 0;     //最近一次对时成功的 millis，0=本次开机还没成功过
+time_t   clkSnap   = 0;     //上一次 now() 的结果（算对时偏移用；provider 内部不能调 now()，会递归）
+uint8_t  clkVia    = 0;     //最近一次成功的来源：1=NTP 2=HTTP 3=串口/网页手动
+uint8_t  ntpErr    = 0;     //最近一次 NTP 失败原因：1=域名解析失败 2=无响应 3=回包不合法
+int32_t  clkOffset = 0;     //最近一次对时把钟往前(+)/往后(-)拨了多少秒
+String   ntpSrvIp  = "";    //最近一次成功用的服务器 IP
 //wifi连接UDP设置参数
 WiFiUDP Udp;
 WiFiClient wificlient;
@@ -259,6 +274,7 @@ unsigned int localPort = 8000;
 float duty=0;
 //函数声明
 time_t getNtpTime();
+static void clockFixFromHttp(const String &dateHdr, uint8_t via);
 void digitalClockDisplay(int reflash_en);
 void printDigits(int digits);
 String num2str(int digits);
@@ -795,7 +811,8 @@ void handleSaveWifi()
 //设备状态JSON
 void handleStatus()
 {
-  StaticJsonDocument<1024> doc;
+  //字段已有 32 个，文档与输出缓冲都放静态区：放栈上会吃掉近 3KB，Web 处理时栈不够
+  static StaticJsonDocument<1280> doc;
   doc["mode"] = (netMode == NET_STA) ? 0 : 1;
   doc["ip"]   = (netMode == NET_STA) ? WiFi.localIP().toString() : WiFi.softAPIP().toString();
   doc["mac"]  = WiFi.macAddress();
@@ -822,10 +839,27 @@ void handleStatus()
   doc["wxErr"]= wxLastCode;
   doc["rise"]  = sunRise;
   doc["set"]   = sunSet;
+  char tbuf[24];
+  snprintf(tbuf, sizeof(tbuf), "%04d-%02d-%02d %02d:%02d:%02d",
+           year(), month(), day(), hour(), minute(), second());
+  doc["time"]  = tbuf;                                        //设备当前时间
+  doc["epoch"] = (uint32_t)now();
+  doc["tset"]  = (timeStatus() == timeSet) ? 1 : 0;            //钟是否已对过时
+  doc["tvia"]  = clkVia;                                      //1=NTP 2=HTTP 3=手动
+  doc["tage"]  = clkOkAt ? (uint32_t)((millis() - clkOkAt) / 1000) : 0xFFFFFFFF;
+  doc["toff"]  = clkOffset;                                   //上次对时拨了多少秒
+  doc["tnrp"]  = ntpErr;                                      //最近一次 NTP 失败原因
+  doc["tsrv"]  = ntpSrvIp;
   doc["temp"]  = wxTempTxt;//屏幕上的温度读数
   doc["hum"]   = (huminum < 0) ? String("-") : (String(huminum) + "%");//屏幕上的湿度读数
-  char buf[768];//字段变多，留足
-  size_t n = serializeJson(doc, buf);
+  static char buf[1152];
+  size_t need = measureJson(doc);//先量长度，缓冲区不够就报错而不是发半截 JSON
+  if(need + 1 > sizeof(buf))
+  {
+    server.send(500, "text/plain", "status too large");
+    return;
+  }
+  size_t n = serializeJson(doc, buf, sizeof(buf));
   server.send(200, "application/json", buf, n);
 }
 //扫描周边热点（AP模式下短暂切换为AP+STA再扫描）
@@ -1269,6 +1303,7 @@ void setup()
 }
 void loop()
 {
+  clkSnap = now();//顺带触发 TimeLib 的定时对时；下面的 LCD_reflash 复用这个值
   webPoll();//内网Web设置服务
   timeBrightness();//分时段亮度
   LCD_reflash(0);
@@ -1463,6 +1498,12 @@ void getCityWeater(){
     indexEnd = str.indexOf(",{\"fa");
     String jsonFC = str.substring(indexStart+5,indexEnd);
     
+    //对时兜底：NTP 不通时（路由器/运营商封 UDP 123 很常见）借这封回包的 Date 头把钟对正
+    if(timeStatus() != timeSet || (millis() - clkOkAt) > 6UL * 3600UL * 1000UL || clkOkAt == 0)
+    {
+      String dh = httpClient.header("Date");
+      if(dh.length()) clockFixFromHttp(dh, 2);
+    }
     fetchSunTimes();//日出日落单取一次，随后由 weaterData 写进滚动条
     weaterData(&jsonCityDZ,&jsonDataSK,&jsonFC);
     wxOkAt = millis();
@@ -1916,33 +1957,125 @@ String lunarDayStr()
   cache = s;
   return cache;
 }
+//把一个 HTTP Date 头（"Thu, 05 Nov 2026 00:45:12 GMT"）换成东八区秒数；解析失败返回 0
+//用途：UDP 123 被路由器/运营商拦掉时，借天气请求的回包头把钟对正，不用额外发请求
+static time_t httpDateToLocal(const String &raw)
+{
+  if(raw.length() < 29) return 0;
+  static const char MON[] = "JanFebMarAprMayJunJulAugSepOctNovDec";
+  int d = atoi(raw.substring(5, 7).c_str());
+  int mon = 0;
+  String ms = raw.substring(8, 11);
+  for(uint8_t i = 0; i < 12; i++)
+    if(ms == String(MON).substring(i * 3, i * 3 + 3)) { mon = i + 1; break; }
+  int y = atoi(raw.substring(12, 16).c_str());
+  int hh = atoi(raw.substring(17, 19).c_str());
+  int mm = atoi(raw.substring(20, 22).c_str());
+  int ss = atoi(raw.substring(23, 25).c_str());
+  if(mon == 0 || y < 2020 || d < 1 || d > 31 || hh > 23 || mm > 59 || ss > 60) return 0;
+  //公历日期→1970 起的天数（Howard Hinnant 的 days_from_civil）
+  int yy = y - (mon <= 2);
+  int era = (yy >= 0 ? yy : yy - 399) / 400;
+  unsigned yoe = (unsigned)(yy - era * 400);
+  unsigned doy = (153 * (mon > 2 ? mon - 3 : mon + 9) + 2) / 5 + d - 1;
+  unsigned doe = yoe * 365 + yoe / 4 - yoe / 100 + doy;
+  long days = (long)era * 146097 + (long)doe - 719468;
+  return (time_t)(days * 86400 + hh * 3600 + mm * 60 + ss + timeZone * SECS_PER_HOUR);
+}
+//用 HTTP 头里的时间校正本地钟；只有「没对过时」或「偏差超过 60 秒」才动手，避免来回抖
+static void clockFixFromHttp(const String &dateHdr, uint8_t via)
+{
+  time_t t = httpDateToLocal(dateHdr);
+  if(!t) return;
+  int32_t off = (int32_t)((long)t - (long)clkSnap);
+  bool needFix = (timeStatus() != timeSet) || off > 60 || off < -60;
+  if(!needFix) return;
+  setTime(t);
+  clkOkAt = millis();
+  clkVia  = via;
+  clkOffset = off;
+  Serial.printf("对时(HTTP): 偏移 %+lds → %04d-%02d-%02d %02d:%02d:%02d\r\n",
+                (long)off, year(), month(), day(), hour(), minute(), second());
+}
 /*-------- NTP code ----------*/
 const int NTP_PACKET_SIZE = 48; // NTP时间在消息的前48字节中
 byte packetBuffer[NTP_PACKET_SIZE]; //buffer to hold incoming & outgoing packets
+// 单台服务器问一次：成功返回本地时间秒数，失败记下原因并返回 0
+static time_t ntpQuery(const char *host, uint32_t timeoutMs)
+{
+  IPAddress ip;
+  if(!WiFi.hostByName(host, ip, 2000) || ip == IPAddress((uint32_t)0))
+  {
+    ntpErr = 1;//域名解析失败
+    Serial.printf("NTP: %s 解析失败\r\n", host);
+    return 0;
+  }
+  while(Udp.parsePacket() > 0) Udp.flush();//丢掉上次残留的包
+  sendNTPpacket(ip);
+  uint32_t beginWait = millis();
+  while(millis() - beginWait < timeoutMs)
+  {
+    if(Udp.parsePacket() >= NTP_PACKET_SIZE)
+    {
+      Udp.read(packetBuffer, NTP_PACKET_SIZE);
+      //校验：模式=server(4)、层数 1-15、回包的 originate 等于我们发的 transmit
+      uint8_t mode = packetBuffer[0] & 0x07;
+      uint8_t stratum = packetBuffer[1];
+      if(mode != 4 || stratum == 0 || stratum > 15)
+      {
+        ntpErr = 3;
+        Serial.printf("NTP: %s 回包不合法(mode=%u stratum=%u)\r\n", host, mode, stratum);
+        continue;
+      }
+      bool origOk = true;
+      for(uint8_t i = 0; i < 8; i++)
+        if(packetBuffer[24 + i] != packetBuffer[40 + i]) { origOk = false; break; }
+      if(!origOk)
+      {
+        ntpErr = 3;
+        Serial.printf("NTP: %s 回包时间戳对不上（可能是伪造/错包）\r\n", host);
+        continue;
+      }
+      unsigned long secs = ((unsigned long)packetBuffer[40] << 24) |
+                           ((unsigned long)packetBuffer[41] << 16) |
+                           ((unsigned long)packetBuffer[42] << 8)  |
+                            (unsigned long)packetBuffer[43];
+      time_t t = (time_t)(secs - 2208988800UL + timeZone * SECS_PER_HOUR);
+      //值域校验：早于 2020 年说明包有问题，宁可不用
+      if(t < 1577836800UL || t > 4102444800UL)
+      {
+        ntpErr = 3;
+        Serial.printf("NTP: %s 时间值不合理(%lu)\r\n", host, (unsigned long)t);
+        continue;
+      }
+      ntpSrvIp = ip.toString();
+      ntpErr = 0;
+      if(clkSnap) clkOffset = (int32_t)((long)t - (long)clkSnap);
+      clkOkAt = millis();
+      clkVia = 1;
+      Serial.printf("NTP: %s 成功 偏移 %+lds\r\n", ntpSrvIp.c_str(), (long)clkOffset);
+      return t;
+    }
+  }
+  ntpErr = 2;//无响应
+  Serial.printf("NTP: %s 无响应\r\n", host);
+  return 0;
+}
 time_t getNtpTime()
 {
-  IPAddress ntpServerIP; // NTP server's ip address
-  while (Udp.parsePacket() > 0) ; // discard any previously received packets
-  // get a random server from the pool
-  WiFi.hostByName(ntpServerName, ntpServerIP);
-  sendNTPpacket(ntpServerIP);
-  uint32_t beginWait = millis();
-  while (millis() - beginWait < 1500) {
-    int size = Udp.parsePacket();
-    if (size >= NTP_PACKET_SIZE) {
-      Serial.println("Receive NTP Response");
-      Udp.read(packetBuffer, NTP_PACKET_SIZE);  // read packet into the buffer
-      unsigned long secsSince1900;
-      // convert four bytes starting at location 40 to a long integer
-      secsSince1900 =  (unsigned long)packetBuffer[40] << 24;
-      secsSince1900 |= (unsigned long)packetBuffer[41] << 16;
-      secsSince1900 |= (unsigned long)packetBuffer[42] << 8;
-      secsSince1900 |= (unsigned long)packetBuffer[43];
-      return secsSince1900 - 2208988800UL + timeZone * SECS_PER_HOUR;
+  //依次试各家服务器；成功的那台下次优先，避免每次都在坏掉的域名上白等
+  for(uint8_t k = 0; k < NTP_SERVER_N; k++)
+  {
+    uint8_t idx = (ntpSrvIdx + k) % NTP_SERVER_N;
+    time_t t = ntpQuery(NTP_SERVERS[idx], 1200);
+    if(t)
+    {
+      ntpSrvIdx = idx;
+      return t;
     }
   }
   Serial.println("No NTP Response :-(");
-  return 0; // 无法获取时间时返回0
+  return 0;//全部失败返回 0，TimeLib 会在下一个同步周期再试
 }
 // 向NTP服务器发送请求
 void sendNTPpacket(IPAddress &address)
@@ -1960,6 +2093,13 @@ void sendNTPpacket(IPAddress &address)
   packetBuffer[13] = 0x4E;
   packetBuffer[14] = 49;
   packetBuffer[15] = 52;
+  // transmit 时间戳填一个会变化的值（毫秒数），服务器会原样抄进 originate 字段，
+  // 回包时用来确认「这个包确实是回给我的」，顺手挡掉错包/伪造包
+  uint32_t tx = millis() ^ 0x5A5AA5A5UL;
+  packetBuffer[40] = (tx >> 24) & 0xFF;
+  packetBuffer[41] = (tx >> 16) & 0xFF;
+  packetBuffer[42] = (tx >> 8) & 0xFF;
+  packetBuffer[43] = tx & 0xFF;
   // all NTP fields have been given values, now
   // you can send a packet requesting a timestamp:
   Udp.beginPacket(address, 123); //NTP requests are to port 123
