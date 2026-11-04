@@ -1,0 +1,3 @@
+# 源码按 CRLF 存放（Arduino IDE 环境），关闭换行符自动转换
+* -text
+*.bin binary

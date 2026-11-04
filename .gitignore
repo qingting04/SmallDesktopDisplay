@@ -1,0 +1,31 @@
+# 构建产物
+.pio/
+.pioenvs/
+.piolibdeps/
+*.o
+*.d
+*.bin.tmp
+
+# 文件系统镜像（由 pio run -t buildfs 生成）
+SDD15_pio/littlefs_1MB.bin
+
+# 编辑器与临时文件
+.ekko-tmp/
+.qoder/
+.vscode/
+.DS_Store
+*.swp
+
+# 厂商库自带的示例：29 MB，与本项目无关，留在上游仓库即可
+libraries/TFT_eSPI/examples/
+
+# 第三方商业字体与图标（苹方、阿里妈妈等），授权受限，不随仓库分发
+# 需要 UI_THEME 1 时自行备好同名文件放进 data/font 与 data/wx
+SDD15_pio/data/font/*.vlw
+SDD15_pio/data/wx/*.jpg
+SmallDesktopDisplay/data/font/*.vlw
+SmallDesktopDisplay/data/wx/*.jpg
+
+# Python 虚拟环境（make-assets 用 uv 管理）
+.venv/
+__pycache__/

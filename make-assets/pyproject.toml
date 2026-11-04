@@ -1,0 +1,15 @@
+[project]
+name = "sdd-make-assets"
+version = "1.0.0"
+description = "SmallDesktopDisplay 素材生成：meteocons SVG -> JPEG PROGMEM 头文件、Bahnschrift 数字点阵、农历表校验"
+requires-python = ">=3.11"
+dependencies = [
+    "pillow>=12.3",
+    "cairosvg>=2.9",
+    "lunardate>=0.3",
+]
+
+[tool.uv]
+[[tool.uv.index]]
+url = "https://pypi.tuna.tsinghua.edu.cn/simple"
+default = true
