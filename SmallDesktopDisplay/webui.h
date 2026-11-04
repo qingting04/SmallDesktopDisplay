@@ -2,10 +2,19 @@
  *
  * webui.h  —  SDD 内网设置页面（深色卡片式中文 UI）
  *
- * 两套页面：SDD_PAGE_AP   配网模式（仅WiFi配网）
- *           SDD_PAGE      已联网模式（仅显示设置，无WiFi内容）
- * 整页以 PROGMEM 存储，由 handleRoot() 经 server.send_P() 一次性发送，
- * 避免运行时大 String 拼接造成堆碎片。
+ * 两套页面：配网模式（状态 + WiFi配网）/ 已联网模式（状态 + 显示设置）
+ *
+ * 组织方式：共用部分只存一份，由 main.cpp 的 sendPageParts() 分段发送：
+ *   SDD_HEAD_AP|STA   页面头（标题不同）
+ *   SDD_CSS           两页共用样式  ← 改样式只改这里
+ *   SDD_CSS_AP|STA    单页样式差异（只有 select 一条）
+ *   SDD_BODY_AP|STA   页面主体
+ *   SDD_TOAST         共用 toast 容器
+ *   SDD_JS_LIB        共用脚本（toast/请求/错误码/状态卡/OTA）  ← 改脚本只改这里
+ *   SDD_JS_AP|STA     页面独有脚本（扫描配网 / 设置项）
+ *
+ * 全部是 PROGMEM 常量，发送时逐段 sendContent_P() 拷出去，
+ * 不做运行时 String 拼接，避免堆碎片。
  * 注意：本文件必须保持 UTF-8 编码，页面含中文。
  *
  * *****************************************************************/
@@ -14,12 +23,14 @@
 
 #include <pgmspace.h>
 
-/*---------------- AP配网模式页面：仅状态 + WiFi配网 ----------------*/
-static const char SDD_PAGE_AP[] PROGMEM = R"rawliteral(<!DOCTYPE html><html lang="zh-CN"><head>
-<meta charset="UTF-8">
-<meta name="viewport" content="width=device-width,initial-scale=1">
-<title>SDD · WiFi配网</title>
-<style>
+/*---------------- 页面头 ----------------*/
+static const char SDD_HEAD_AP[] PROGMEM =
+  "<!DOCTYPE html><html lang=\"zh-CN\"><head>\n<meta charset=\"UTF-8\">\n<meta name=\"viewport\" content=\"width=device-width,initial-scale=1\">\n<title>SDD · WiFi配网</title>\n";
+static const char SDD_HEAD_STA[] PROGMEM =
+  "<!DOCTYPE html><html lang=\"zh-CN\"><head>\n<meta charset=\"UTF-8\">\n<meta name=\"viewport\" content=\"width=device-width,initial-scale=1\">\n<title>SDD · 显示设置</title>\n";
+
+/*---------------- 共用样式（两页一份） ----------------*/
+static const char SDD_CSS[] PROGMEM = R"css(
 :root{--bg:#14171c;--card:#1f242c;--fg:#e8eaed;--dim:#8b98a9;--acc:#4da3ff;--line:#2e3742}
 *{box-sizing:border-box}
 body{margin:0;padding:14px;background:var(--bg);color:var(--fg);font-family:-apple-system,"PingFang SC","Microsoft YaHei",sans-serif;font-size:14px;max-width:520px;margin:0 auto}
@@ -30,7 +41,6 @@ h1 small{color:var(--dim);font-size:12px;font-weight:normal;margin-left:8px}
 .row{display:flex;align-items:center;gap:8px;margin:8px 0;flex-wrap:wrap}
 .lab{min-width:88px}
 .dim{color:var(--dim)}
-input[type=text],input[type=password],select{background:#101318;border:1px solid var(--line);color:var(--fg);border-radius:8px;padding:7px 9px;font-size:14px;width:130px}
 .filein{background:#101318;border:1px dashed var(--line);color:var(--dim);border-radius:8px;padding:7px 9px;font-size:12px;flex:1;min-width:150px;max-width:100%}
 .btn{background:var(--acc);color:#0b1220;border:0;border-radius:8px;padding:9px 16px;font-size:14px;font-weight:bold;cursor:pointer}
 .btn:disabled{opacity:.45;cursor:wait}
@@ -39,8 +49,76 @@ input[type=text],input[type=password],select{background:#101318;border:1px solid
 .toast{position:fixed;left:50%;bottom:26px;transform:translateX(-50%);background:#2b3442;border:1px solid var(--acc);padding:9px 16px;border-radius:10px;opacity:0;transition:.3s;max-width:92%}
 .toast.show{opacity:1}
 footer{color:var(--dim);text-align:center;margin:16px 0 6px;font-size:12px}
-</style></head><body>
-<h1>SDD 桌面显示器<small id="ver">V2.3</small></h1>
+input[type=text],input[type=password],input[type=number]{background:#101318;border:1px solid var(--line);color:var(--fg);border-radius:8px;padding:7px 9px;font-size:14px;width:130px}
+input[type=checkbox]{accent-color:var(--acc);width:16px;height:16px}
+input[type=range]{flex:1;accent-color:var(--acc)}
+input[type=radio]{accent-color:var(--acc)}
+)css";
+
+/*---------------- 单页样式差异 ----------------*/
+static const char SDD_CSS_AP[] PROGMEM = R"css(select{background:#101318;border:1px solid var(--line);color:var(--fg);border-radius:8px;padding:7px 9px;font-size:14px;width:130px})css";
+static const char SDD_CSS_STA[] PROGMEM = R"css(select{background:#101318;border:1px solid var(--line);color:var(--fg);border-radius:8px;padding:6px 8px;font-size:14px})css";
+
+/*---------------- 共用脚本（两页一份） ----------------*/
+static const char SDD_JS_LIB[] PROGMEM = R"js(
+var tstT=null,otaBusy=false,OTA_MAX=1040000,TST_MS=2500;
+function $(i){return document.getElementById(i)}
+function tst(m,ms){var t=$('tst');t.textContent=m;t.classList.add('show');clearTimeout(tstT);tstT=setTimeout(function(){t.classList.remove('show')},ms||TST_MS)}
+function errText(k){var m={bl:'亮度只能 1-100',upt:'天气更新间隔只能 1-60 分钟',tbl:'分时段亮度只接受 0/1',nbl:'夜间亮度只能 1-100',nst:'夜间开始只接受 0-23 点',net:'夜间结束只接受 0-23 点',cc:'城市代码要 7 位，例如 101250101',cn:'城市名称最多 24 个字',rot:'屏幕方向只能 0-3'};return m[k]||('参数不合法'+(k?'（'+k+'）':''))}
+async function req(u,opt){var c=new AbortController();var to=setTimeout(function(){c.abort()},8000);opt=opt||{};opt.signal=c.signal;try{var r=await fetch(u,opt);clearTimeout(to);return await r.json()}catch(e){clearTimeout(to);return null}}
+/* 状态卡：各页面只提供 pageRows()，拼装/刷新/时效文字只写这一份 */
+function upTxt(s){return Math.floor(s.up/3600)+'时'+Math.floor(s.up%3600/60)+'分'}
+function wxTxt(s){return (s.wxAge===4294967295)?'从未成功':(s.wxAge<120?s.wxAge+' 秒前':(s.wxAge<7200?Math.floor(s.wxAge/60)+' 分钟前':Math.floor(s.wxAge/3600)+' 小时前'))}
+function wxRow(s){return ['天气更新',wxTxt(s)+(s.wxErr?'（上次HTTP '+s.wxErr+'）':'')]}
+function kvMid(s){return [['运行时长',upTxt(s)],['固件版本',s.ver],wxRow(s),['天气读数',(s.temp||'-')+' / '+(s.hum||'-')]]}
+function kvMem(s){return [['可用内存',Math.round(s.heap/1024)+' KB（碎片 '+s.frag+'%）'],['Flash',s.flash+' KB，固件 '+s.sketch+' KB']]}
+function kvHtml(rows){var h='';for(var i=0;i<rows.length;i++)h+='<div class="kv"><span>'+rows[i][0]+'</span><span>'+rows[i][1]+'</span></div>';return h}
+async function baseRefresh(rowsFn){
+if(otaBusy)return null;
+var s=await req('/api/status');
+if(!s){tst('设备无响应，请稍后重试');return null}
+$('st').innerHTML=kvHtml(rowsFn(s));$('ver').textContent=s.ver;
+return s;
+}
+/* 升级后设备要重启：轮询 /api/status 直到重新应答，再刷新页面（避免固定等待时间猜不准） */
+function waitBack(n){
+if(n>28){$('otamsg').textContent='等待超时，请手动刷新页面';return}
+$('otamsg').textContent='等待重启'+(n?('（'+(n*3)+'s）'):'');
+setTimeout(async function(){
+var s=await req('/api/status');
+if(s){$('otamsg').textContent='已升级到 '+s.ver;setTimeout(function(){location.reload()},1200)}
+else waitBack(n+1)
+},3000)}
+/* 固件升级：multipart 上传到 /update，设备写完即重启，靠版本号确认 */
+function doOta(){
+var el=$('fw');
+if(!el.files||!el.files.length){tst('先选一个 .bin 文件');return}
+var f=el.files[0];
+if(!/\.bin$/i.test(f.name)){tst('只支持 .bin 文件');return}
+if(f.size>OTA_MAX){tst('文件太大，上限 '+(OTA_MAX/1024|0)+'KB');return}
+if(!confirm('上传 '+f.name+'（'+(f.size/1024|0)+'KB）？\n上传期间勿断电。'))return;
+var b=$('btnota'),box=$('otabox'),bar=$('otabar'),msg=$('otamsg');
+otaBusy=true;b.disabled=true;b.textContent='上传中…';box.style.display='block';bar.style.width='0%';msg.textContent='上传中 0%';
+var fd=new FormData();fd.append('firmware',f,f.name);
+var x=new XMLHttpRequest();
+x.open('POST','/update',true);
+x.upload.onprogress=function(e){if(!e.lengthComputable)return;var p=Math.floor(e.loaded/e.total*100);bar.style.width=p+'%';msg.textContent='上传中 '+p+'%';};
+x.onload=function(){
+var j=null;try{j=JSON.parse(x.responseText)}catch(e2){}
+if(j&&j.ok==1){bar.style.width='100%';waitBack(0)}
+else{otaBusy=false;b.disabled=false;b.textContent='上传文件';msg.textContent='上传失败'+(j&&j.code?'（错误码 '+j.code+'）':'');}
+};
+x.onerror=function(){waitBack(0)};
+x.send(fd);
+}
+)js";
+
+/*---------------- 共用 toast 容器 ----------------*/
+static const char SDD_TOAST[] PROGMEM = "<div class=\"toast\" id=\"tst\"></div>";
+
+/*---------------- AP 配网页 ----------------*/
+static const char SDD_BODY_AP[] PROGMEM = R"html(
+<h1>SDD 桌面显示器<small id="ver">V2.4</small></h1>
 <div class="card"><div class="t">设备状态</div><div id="st" class="dim">状态加载中…</div></div>
 <div class="card"><div class="t">WiFi 配网</div>
 <div class="dim" style="margin-bottom:6px">当前为配网模式：选择或输入家里WiFi，保存后设备重启并自动连接。</div>
@@ -53,24 +131,10 @@ footer{color:var(--dim);text-align:center;margin:16px 0 6px;font-size:12px}
 <div class="row"><input id="fw" class="filein" type="file" accept=".bin"><button class="btn" id="btnota" onclick="doOta()">上传文件</button></div>
 <div id="otabox" style="display:none;margin-top:4px"><div style="height:8px;background:#101318;border-radius:4px;overflow:hidden"><div id="otabar" style="height:100%;width:0;background:var(--acc)"></div></div><div id="otamsg" class="dim" style="margin-top:6px"></div></div></div>
 <footer>配网完成后，页面将切换为显示设置</footer>
-<div class="toast" id="tst"></div>
-<script>
-var tstT=null,otaBusy=false,OTA_MAX=1040000;
-function $(i){return document.getElementById(i)}
-function tst(m){var t=$('tst');t.textContent=m;t.classList.add('show');clearTimeout(tstT);tstT=setTimeout(function(){t.classList.remove('show')},2500)}
-
-/* 设备返回的字段级错误码 → 能让人照着改的中文 */
-function errText(k){var m={bl:'亮度只能 1-100',upt:'天气更新间隔只能 1-60 分钟',tbl:'分时段亮度只接受 0/1',nbl:'夜间亮度只能 1-100',nst:'夜间开始只接受 0-23 点',net:'夜间结束只接受 0-23 点',cc:'城市代码要 7 位，例如 101250101',cn:'城市名称最多 24 个字',rot:'屏幕方向只能 0-3'};return m[k]||('参数不合法'+(k?'（'+k+'）':''))}
-async function req(u,opt){var c=new AbortController();var to=setTimeout(function(){c.abort()},8000);opt=opt||{};opt.signal=c.signal;try{var r=await fetch(u,opt);clearTimeout(to);return await r.json()}catch(e){clearTimeout(to);return null}}
-async function refresh(){
-if(otaBusy)return;
-var s=await req('/api/status');
-if(!s){tst('设备无响应，请稍后重试');return}
-var wxAge=(s.wxAge===4294967295)?'从未成功':(s.wxAge<120?s.wxAge+' 秒前':(s.wxAge<7200?Math.floor(s.wxAge/60)+' 分钟前':Math.floor(s.wxAge/3600)+' 小时前'));
-var k=[['模式','AP配网热点'],['热点名称',s.ssid||'-'],['访问地址',s.ip||'-'],['运行时长',Math.floor(s.up/3600)+'时'+Math.floor(s.up%3600/60)+'分'],['固件版本',s.ver],['天气更新',wxAge+(s.wxErr?'（上次HTTP '+s.wxErr+'）':'')],['天气读数',(s.temp||'-')+' / '+(s.hum||'-')],['可用内存',Math.round(s.heap/1024)+' KB（碎片 '+s.frag+'%）'],['Flash',s.flash+' KB，固件 '+s.sketch+' KB']];
-var h='';for(var i=0;i<k.length;i++)h+='<div class="kv"><span>'+k[i][0]+'</span><span>'+k[i][1]+'</span></div>';
-$('st').innerHTML=h;$('ver').textContent=s.ver;
-}
+)html";
+static const char SDD_JS_AP[] PROGMEM = R"js(
+function pageRows(s){return [['模式','AP配网热点'],['热点名称',s.ssid||'-'],['访问地址',s.ip||'-']].concat(kvMid(s),kvMem(s))}
+async function refresh(){await baseRefresh(pageRows)}
 $('ssid').oninput=function(){$('scanlist').selectedIndex=0};
 async function doScan(){
 var b=$('btnscan');b.disabled=true;b.textContent='扫描中…';$('scaninfo').textContent='正在扫描周边WiFi（约2-5秒），请稍候…';
@@ -93,73 +157,13 @@ var j=await r.json().catch(function(){return null});
 if(j&&j.ok==1){document.body.innerHTML='<div style="text-align:center;padding:60px 20px;font-size:16px">已保存，设备重启中…<br><br>约30秒后请刷新本页面<br>连上家里WiFi后页面即为显示设置</div>'}
 else{tst('保存失败');b.disabled=false;b.textContent='保存并重启'}
 }
-/* 升级后设备要重启：轮询 /api/status 直到重新应答，再刷新页面（避免固定等待时间猜不准） */
-function waitBack(n){
-if(n>28){$('otamsg').textContent='等待超时，请手动刷新页面';return}
-$('otamsg').textContent='等待重启'+(n?('（'+(n*3)+'s）'):'');
-setTimeout(async function(){
-var s=await req('/api/status');
-if(s){$('otamsg').textContent='已升级到 '+s.ver;setTimeout(function(){location.reload()},1200)}
-else waitBack(n+1)
-},3000)}
-/* 固件升级：multipart 上传到 /update，设备写完即重启，靠版本号确认 */
-function doOta(){
-var el=$('fw');
-if(!el.files||!el.files.length){tst('先选一个 .bin 文件');return}
-var f=el.files[0];
-if(!/\.bin$/i.test(f.name)){tst('只支持 .bin 文件');return}
-if(f.size>OTA_MAX){tst('文件太大，上限 '+(OTA_MAX/1024|0)+'KB');return}
-if(!confirm('上传 '+f.name+'（'+(f.size/1024|0)+'KB）？\n上传期间勿断电。'))return;
-var b=$('btnota'),box=$('otabox'),bar=$('otabar'),msg=$('otamsg');
-otaBusy=true;b.disabled=true;b.textContent='上传中…';box.style.display='block';bar.style.width='0%';msg.textContent='上传中 0%';
-var fd=new FormData();fd.append('firmware',f,f.name);
-var x=new XMLHttpRequest();
-x.open('POST','/update',true);
-x.upload.onprogress=function(e){if(!e.lengthComputable)return;var p=Math.floor(e.loaded/e.total*100);bar.style.width=p+'%';msg.textContent='上传中 '+p+'%';};
-x.onload=function(){
-var j=null;try{j=JSON.parse(x.responseText)}catch(e2){}
-if(j&&j.ok==1){bar.style.width='100%';waitBack(0)}
-else{otaBusy=false;b.disabled=false;b.textContent='上传文件';msg.textContent='上传失败'+(j&&j.code?'（错误码 '+j.code+'）':'');}
-};
-x.onerror=function(){waitBack(0)};
-x.send(fd);
-}
 window.onload=refresh;
 setInterval(refresh,8000);
-</script>
-</body></html>)rawliteral";
+)js";
 
-/*---------------- 已联网模式页面：仅显示设置（无WiFi内容） ----------------*/
-static const char SDD_PAGE[] PROGMEM = R"rawliteral(<!DOCTYPE html><html lang="zh-CN"><head>
-<meta charset="UTF-8">
-<meta name="viewport" content="width=device-width,initial-scale=1">
-<title>SDD · 显示设置</title>
-<style>
-:root{--bg:#14171c;--card:#1f242c;--fg:#e8eaed;--dim:#8b98a9;--acc:#4da3ff;--line:#2e3742}
-*{box-sizing:border-box}
-body{margin:0;padding:14px;background:var(--bg);color:var(--fg);font-family:-apple-system,"PingFang SC","Microsoft YaHei",sans-serif;font-size:14px;max-width:520px;margin:0 auto}
-h1{font-size:17px;margin:6px 2px 14px}
-h1 small{color:var(--dim);font-size:12px;font-weight:normal;margin-left:8px}
-.card{background:var(--card);border:1px solid var(--line);border-radius:12px;padding:14px;margin:12px 0}
-.t{color:var(--acc);font-weight:bold;margin-bottom:10px}
-.row{display:flex;align-items:center;gap:8px;margin:8px 0;flex-wrap:wrap}
-.lab{min-width:88px}
-.dim{color:var(--dim)}
-input[type=text],input[type=number]{background:#101318;border:1px solid var(--line);color:var(--fg);border-radius:8px;padding:7px 9px;font-size:14px;width:130px}
-select{background:#101318;border:1px solid var(--line);color:var(--fg);border-radius:8px;padding:6px 8px;font-size:14px}
-.filein{background:#101318;border:1px dashed var(--line);color:var(--dim);border-radius:8px;padding:7px 9px;font-size:12px;flex:1;min-width:150px;max-width:100%}
-input[type=checkbox]{accent-color:var(--acc);width:16px;height:16px}
-input[type=range]{flex:1;accent-color:var(--acc)}
-input[type=radio]{accent-color:var(--acc)}
-.btn{background:var(--acc);color:#0b1220;border:0;border-radius:8px;padding:9px 16px;font-size:14px;font-weight:bold;cursor:pointer}
-.btn:disabled{opacity:.45;cursor:wait}
-.kv{display:flex;justify-content:space-between;border-bottom:1px dashed var(--line);padding:5px 0}
-.kv:last-child{border-bottom:0}
-.toast{position:fixed;left:50%;bottom:26px;transform:translateX(-50%);background:#2b3442;border:1px solid var(--acc);padding:9px 16px;border-radius:10px;opacity:0;transition:.3s;max-width:92%}
-.toast.show{opacity:1}
-footer{color:var(--dim);text-align:center;margin:16px 0 6px;font-size:12px}
-</style></head><body>
-<h1>SDD 桌面显示器<small id="ver">V2.3</small></h1>
+/*---------------- 已联网设置页 ----------------*/
+static const char SDD_BODY_STA[] PROGMEM = R"html(
+<h1>SDD 桌面显示器<small id="ver">V2.4</small></h1>
 <div class="card"><div class="t">设备状态</div><div id="st" class="dim">状态加载中…</div></div>
 <div class="card"><div class="t">显示设置</div>
 <div class="row"><span class="lab">亮度·白天</span><input id="bl" type="range" min="1" max="100" onchange="saveCfg()"><span id="blv" style="width:40px"></span></div>
@@ -179,11 +183,15 @@ footer{color:var(--dim);text-align:center;margin:16px 0 6px;font-size:12px}
 <div class="row"><input id="fw" class="filein" type="file" accept=".bin"><button class="btn" id="btnota" onclick="doOta()">上传文件</button></div>
 <div id="otabox" style="display:none;margin-top:4px"><div style="height:8px;background:#101318;border-radius:4px;overflow:hidden"><div id="otabar" style="height:100%;width:0;background:var(--acc)"></div></div><div id="otamsg" class="dim" style="margin-top:6px"></div></div></div>
 <footer>SmallDesktopDisplay · 按 Ctrl+F5 强制刷新可更新页面</footer>
-<div class="toast" id="tst"></div>
-<script>
-var tstT=null,rotLocked=false,editing=false,cityP=null,otaBusy=false,OTA_MAX=1040000;
-function $(i){return document.getElementById(i)}
-function tst(m){var t=$('tst');t.textContent=m;t.classList.add('show');clearTimeout(tstT);tstT=setTimeout(function(){t.classList.remove('show')},4000)}
+)html";
+static const char SDD_JS_STA[] PROGMEM = R"js(
+TST_MS=4000;var rotLocked=false,editing=false,cityP=null;
+function pageRows(s){return [['模式','内网STA已连接'],['IP地址',s.ip||'-'],['信号',s.rssi+' dBm'],['已连接SSID',s.ssid||'-']].concat(kvMid(s),[['白天/黑夜',(s.rise||'-')+' / '+(s.set||'-')]],kvMem(s))}
+async function refresh(){var s=await baseRefresh(pageRows);if(!s)return;
+if(!editing){$('bl').value=s.bl;$('blv').textContent=s.bl+'%';$('cc').value=s.city;$('cn').value=s.cn||'';$('upt').value=s.upt;
+$('tbl').checked=s.tbl==1;$('nbl').value=s.nbl;$('nblv').textContent=s.nbl+'%';$('nst').value=s.nst;$('net').value=s.net;}
+if(!rotLocked)setRot(s.rot);
+}
 /* 手动编辑过输入框后暂停自动回填，防止8秒刷新覆盖未保存内容 */
 var fds=['bl','cc','cn','upt','tbl','nbl','nst','net'];for(var fi=0;fi<fds.length;fi++){(function(id){var e=$(id);e.oninput=e.onchange=function(){editing=true};})(fds[fi]);}
 $('nbl').addEventListener('input',function(){$('nblv').textContent=this.value+'%'});
@@ -206,20 +214,6 @@ function getRot(){var r=document.querySelector('input[name=rot]:checked');return
 function setRot(v){var r=document.querySelector('input[name=rot][value="'+v+'"]');if(r)r.checked=true}
 
 /* 设备返回的字段级错误码 → 能让人照着改的中文 */
-function errText(k){var m={bl:'亮度只能 1-100',upt:'天气更新间隔只能 1-60 分钟',tbl:'分时段亮度只接受 0/1',nbl:'夜间亮度只能 1-100',nst:'夜间开始只接受 0-23 点',net:'夜间结束只接受 0-23 点',cc:'城市代码要 7 位，例如 101250101',cn:'城市名称最多 24 个字',rot:'屏幕方向只能 0-3'};return m[k]||('参数不合法'+(k?'（'+k+'）':''))}
-async function req(u,opt){var c=new AbortController();var to=setTimeout(function(){c.abort()},8000);opt=opt||{};opt.signal=c.signal;try{var r=await fetch(u,opt);clearTimeout(to);return await r.json()}catch(e){clearTimeout(to);return null}}
-async function refresh(){
-if(otaBusy)return;
-var s=await req('/api/status');
-if(!s){tst('设备无响应，请稍后重试');return}
-var wxAge=(s.wxAge===4294967295)?'从未成功':(s.wxAge<120?s.wxAge+' 秒前':(s.wxAge<7200?Math.floor(s.wxAge/60)+' 分钟前':Math.floor(s.wxAge/3600)+' 小时前'));
-var k=[['模式','内网STA已连接'],['IP地址',s.ip||'-'],['信号',s.rssi+' dBm'],['已连接SSID',s.ssid||'-'],['运行时长',Math.floor(s.up/3600)+'时'+Math.floor(s.up%3600/60)+'分'],['固件版本',s.ver],['天气更新',wxAge+(s.wxErr?'（上次HTTP '+s.wxErr+'）':'')],['天气读数',(s.temp||'-')+' / '+(s.hum||'-')],['白天/黑夜',(s.rise||'-')+' / '+(s.set||'-')],['可用内存',Math.round(s.heap/1024)+' KB（碎片 '+s.frag+'%）'],['Flash',s.flash+' KB，固件 '+s.sketch+' KB']];
-var h='';for(var i=0;i<k.length;i++)h+='<div class="kv"><span>'+k[i][0]+'</span><span>'+k[i][1]+'</span></div>';
-$('st').innerHTML=h;$('ver').textContent=s.ver;
-if(!editing){$('bl').value=s.bl;$('blv').textContent=s.bl+'%';$('cc').value=s.city;$('cn').value=s.cn||'';$('upt').value=s.upt;
-$('tbl').checked=s.tbl==1;$('nbl').value=s.nbl;$('nblv').textContent=s.nbl+'%';$('nst').value=s.nst;$('net').value=s.net;}
-if(!rotLocked)setRot(s.rot);
-}
 function lockRot(){this.onchange=function(){rotLocked=true;tst('屏幕方向已改为 '+this.value+'，点击“保存设置”生效')}}
 var rs=document.querySelectorAll('input[name=rot]');for(var i=0;i<rs.length;i++)rs[i].onclick=lockRot;
 async function saveCfg(){
@@ -240,40 +234,18 @@ setBtn('保存中…',true);
 var d=await req('/save',{method:'POST',body:new URLSearchParams({bl:$('bl').value,rot:getRot(),cc:$('cc').value,cn:cn,upt:$('upt').value,tbl:$('tbl').checked?1:0,nbl:$('nbl').value,nst:$('nst').value,net:$('net').value})});
 setBtn('保存设置',false);
 if(d&&d.ok==1){tst('设置已保存');rotLocked=false;editing=false;refresh()}else tst('保存失败：'+(d&&d.err?errText(d.err):'设备无响应'))}
-/* 升级后设备要重启：轮询 /api/status 直到重新应答，再刷新页面（避免固定等待时间猜不准） */
-function waitBack(n){
-if(n>28){$('otamsg').textContent='等待超时，请手动刷新页面';return}
-$('otamsg').textContent='等待重启'+(n?('（'+(n*3)+'s）'):'');
-setTimeout(async function(){
-var s=await req('/api/status');
-if(s){$('otamsg').textContent='已升级到 '+s.ver;setTimeout(function(){location.reload()},1200)}
-else waitBack(n+1)
-},3000)}
-/* 固件升级：multipart 上传到 /update，设备写完即重启，靠版本号确认 */
-function doOta(){
-var el=$('fw');
-if(!el.files||!el.files.length){tst('先选一个 .bin 文件');return}
-var f=el.files[0];
-if(!/\.bin$/i.test(f.name)){tst('只支持 .bin 文件');return}
-if(f.size>OTA_MAX){tst('文件太大，上限 '+(OTA_MAX/1024|0)+'KB');return}
-if(!confirm('上传 '+f.name+'（'+(f.size/1024|0)+'KB）？\n上传期间勿断电。'))return;
-var b=$('btnota'),box=$('otabox'),bar=$('otabar'),msg=$('otamsg');
-otaBusy=true;b.disabled=true;b.textContent='上传中…';box.style.display='block';bar.style.width='0%';msg.textContent='上传中 0%';
-var fd=new FormData();fd.append('firmware',f,f.name);
-var x=new XMLHttpRequest();
-x.open('POST','/update',true);
-x.upload.onprogress=function(e){if(!e.lengthComputable)return;var p=Math.floor(e.loaded/e.total*100);bar.style.width=p+'%';msg.textContent='上传中 '+p+'%';};
-x.onload=function(){
-var j=null;try{j=JSON.parse(x.responseText)}catch(e2){}
-if(j&&j.ok==1){bar.style.width='100%';waitBack(0)}
-else{otaBusy=false;b.disabled=false;b.textContent='上传文件';msg.textContent='上传失败'+(j&&j.code?'（错误码 '+j.code+'）':'');}
-};
-x.onerror=function(){waitBack(0)};
-x.send(fd);
-}
 window.onload=refresh;
 setInterval(refresh,8000);
-</script>
-</body></html>)rawliteral";
+)js";
+
+/*---------------- 页面索引 ----------------*/
+struct SddPage {
+  const char *head;   // 页面头（含 <title>）
+  const char *css;    // 单页样式差异
+  const char *body;   // 页面主体
+  const char *js;     // 单页脚本
+};
+static const SddPage SDD_PAGE_AP = { SDD_HEAD_AP, SDD_CSS_AP, SDD_BODY_AP, SDD_JS_AP };
+static const SddPage SDD_PAGE_STA = { SDD_HEAD_STA, SDD_CSS_STA, SDD_BODY_STA, SDD_JS_STA };
 
 #endif

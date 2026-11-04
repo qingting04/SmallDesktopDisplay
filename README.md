@@ -29,7 +29,7 @@ ESP8266 + 1.54 寸 240×240 方屏的桌面天气时钟。显示时间、日期�
 ```
 SDD15_pio/            PlatformIO 工程（主开发树）
   src/main.cpp        固件主体
-  src/webui.h         两个网页（配网页 SDD_PAGE_AP / 设置页 SDD_PAGE），存 PROGMEM
+  src/webui.h         两个网页；共用 CSS/JS 各一份，由 sendPageParts() 分段发送
   src/img/  src/font/ 图标与字模的 PROGMEM 头文件
   data/               LittleFS 素材（UI_THEME 1 时才用，默认不启用）
 SmallDesktopDisplay/  Arduino IDE 副本，与 SDD15_pio 内容等价（.ino = main.cpp 去掉首行 include）
@@ -91,6 +91,7 @@ esptool.py --chip esp8266 --port /dev/ttyUSB0 --baud 460800 \
 | V2.1 | 温度按一位小数；温湿度改「左图标 + 右对齐数值」；滚动条加日出日落 |
 | V2.2 | 设置保存改字段级错误码；Captive portal；`/api/status` 补诊断字段 |
 | V2.3 | 修湿度显示：`"100%"` 被按前两位截成 10（数值对、条形只剩 1/10）→ 取整串数字，1/2/3 位都对；缺 `SD` 回退小写 `sd`；认得不出数字显示 `--`；湿度条形按 0-100 等比且不再改写全局；`/api/status` 与状态卡加「天气读数」 |
+| V2.4 | 代码结构整理：设置保存改表格驱动（加设置项只写一行）；EEPROM 块读写/温湿度进度条各收成一个公共函数；网页两页 CSS/JS 抽成共用常量（省 4.3 KB flash）；删历史注释代码、加分区标题；修串口 `0x02` 设置城市码赋给了从未更新的变量 |
 
 ## 已知限制
 

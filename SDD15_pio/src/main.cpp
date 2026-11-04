@@ -32,6 +32,16 @@
  *            V2.3    修湿度显示：接口给的 "100%" 被 substring(0,2) 截成 10，三位数时数值对、条形只剩 1/10；
  *                    改为取整串数字（1/2/3 位都对），缺 SD 字段时回退小写 sd，认不出数字显示 "--"；
  *                    湿度条形改为按 0-100 等比且不再改写全局；/api/status 与网页状态卡增加“天气读数”。
+ *            V2.4    代码结构整理（功能不变）：设置保存改为表格驱动，加设置项只写一行；
+ *                    EEPROM 整块读写、温湿度进度条各收成一个公共函数；
+ *                    网页两页的 CSS/JS 抽成共用常量，样式/脚本只存一份（省 4.3KB flash）；
+ *                    删掉注释掉的历史代码，按功能加分区标题；
+ *                    顺带修串口 0x02 设置城市码时赋给了从未更新的变量（手动设的城市码会被丢掉）。
+ *
+ * 文 件 结 构（按顺序）：
+ *   库文件/配置位/屏幕坐标/字库 → 参数与状态变量 → EEPROM 存取 → 屏幕绘制
+ *   → 串口命令 → Web 服务（设置/状态/扫描/OTA/Captive）→ 联网（STA/AP/配网）
+ *   → 上电与主循环 → 天气（抓取/解析/写屏）→ 日期农历与 NTP
  *
  * 引 脚 分 配： SCK  GPIO14
  *             MOSI  GPIO13
@@ -41,7 +51,7 @@
  * 
  *    感谢群友 @你别失望  提醒发现WiFi保存后无法重置的问题，目前已解决。详情查看更改说明！
  * *****************************************************************/
-#define Version  "SDD V2.3"
+#define Version  "SDD V2.4"
 /* *****************************************************************
  *  库文件、头文件
  * *****************************************************************/
@@ -191,9 +201,9 @@ config_type wificonf ={{""},{""}};
 int updateweater_time = 10; //天气更新时间  X 分钟
 int LCD_Rotation = 0;   //LCD屏幕方向
 int LCD_BL_PWM = 50;//屏幕亮度0-100，默认50（分时段开启时为“白天亮度”）
-uint8_t TBl_en = 0;//分时段亮度开关 0关1开
-uint8_t nightBl = 2;//夜间亮度（默认很暗）
-uint8_t nightStart = 22, nightEnd = 7;//夜间时段：22点~次日7点
+int TBl_en = 0;//分时段亮度开关 0关1开
+int nightBl = 2;//夜间亮度（默认很暗）
+int nightStart = 22, nightEnd = 7;//夜间时段：22点~次日7点
 int appliedBl = -1;//当前已生效亮度，-1表示未知
 uint32_t wxOkAt = 0;   //最近一次天气拉取成功时刻（millis），0 = 从未成功
 int      wxLastCode = 0;//最近一次天气请求的 HTTP 码（0 = 还没请求过）
@@ -348,46 +358,46 @@ void readCityName()
     }
   }
 }
-//wifi ssid，psw保存到eeprom
-void savewificonfig()
+//EEPROM 整块读写：几个结构体都按字节搬，统一走这两个函数
+static void eeReadBlock(int addr, void *dst, size_t len)
 {
-  //开始写入
-  uint8_t *p = (uint8_t*)(&wificonf);
-  for (int i = 0; i < sizeof(wificonf); i++)
-  {
-    EEPROM.write(i + wifi_addr, *(p + i)); //在闪存内模拟写入
-  }
+  uint8_t *p = (uint8_t*)dst;
+  for (size_t i = 0; i < len; i++)
+    p[i] = EEPROM.read(addr + i);
+}
+static void eeWriteBlock(int addr, const void *src, size_t len)
+{
+  const uint8_t *p = (const uint8_t*)src;
+  for (size_t i = 0; i < len; i++)
+    EEPROM.write(addr + i, p[i]); //在闪存内模拟写入
   delay(10);
   EEPROM.commit();//执行写入ROM
   delay(10);
+}
+//wifi ssid，psw保存到eeprom
+void savewificonfig()
+{
+  eeWriteBlock(wifi_addr, &wificonf, sizeof(wificonf));
 }
 //删除原有eeprom中的信息
 void deletewificonfig()
 {
   config_type deletewifi ={{""},{""}};
-  uint8_t *p = (uint8_t*)(&deletewifi);
-  for (int i = 0; i < sizeof(deletewifi); i++)
-  {
-    EEPROM.write(i + wifi_addr, *(p + i)); //在闪存内模拟写入
-  }
-  delay(10);
-  EEPROM.commit();//执行写入ROM
-  delay(10);
+  eeWriteBlock(wifi_addr, &deletewifi, sizeof(deletewifi));
 }
 //从eeprom读取WiFi信息ssid，psw
 void readwificonfig()
 {
-  uint8_t *p = (uint8_t*)(&wificonf);
-  for (int i = 0; i < sizeof(wificonf); i++)
-  {
-    *(p + i) = EEPROM.read(i + wifi_addr);
-  }
+  eeReadBlock(wifi_addr, &wificonf, sizeof(wificonf));
   wificonf.stassid[sizeof(wificonf.stassid)-1] = '\0';
   wificonf.stapsw[sizeof(wificonf.stapsw)-1] = '\0';
   Serial.printf("Read WiFi Config.....\r\n");
   Serial.printf("SSID:%s\r\n",wificonf.stassid);
   Serial.printf("PSW:%s\r\n",wificonf.stapsw);
 }
+/* *****************************************************************
+ *  屏幕绘制：JPEG 输出、进度条、提示窗
+ * *****************************************************************/
 //TFT屏幕输出函数
 bool tft_output(int16_t x, int16_t y, uint16_t w, uint16_t h, uint16_t* bitmap)
 {
@@ -413,39 +423,33 @@ void loading(byte delayTime)//绘制进度条
   clk.drawRightString(Version,180,60,2);
   clk.pushSprite(20,120);  //窗口位置
   
-  //clk.setTextDatum(CC_DATUM);
-  //clk.setTextColor(TFT_WHITE, 0x0000); 
-  //clk.pushSprite(130,180);
   
   clk.deleteSprite();
   loadNum += 1;
   delay(delayTime);
 }
-//湿度图标显示函数（室外湿度进度条）
-void humidityWin(int pct)
+//室外温/湿度那条小进度条：52x6 空框 + 实心块，wid 已是像素宽（0-50）
+static void drawLcdBar(int barX, int barY, int wid, uint16_t color)
 {
-  //内框可用宽度 50px（x=1..50），按 0-100 等比映射；pct<0（无有效读数）画空条
-  int w = (pct < 0) ? 0 : (pct > 100 ? 50 : pct / 2);
+  if(wid < 0)  wid = 0;
+  if(wid > 50) wid = 50;
   clk.setColorDepth(8);
-  
   clk.createSprite(52, 6);  //创建窗口
   clk.fillSprite(0x0000);    //填充率
-  clk.drawRoundRect(0,0,52,6,3,0xFFFF);  //空心圆角矩形  起始位x,y,长度，宽度，圆弧半径，颜色
-  if(w > 0) clk.fillRoundRect(1,1,w,4,2,humicol);   //实心圆角矩形
-  clk.pushSprite(L_HU_BAR_X,L_HU_BAR_Y);  //窗口位置
+  clk.drawRoundRect(0,0,52,6,3,0xFFFF);        //空心圆角矩形
+  if(wid > 0) clk.fillRoundRect(1,1,wid,4,2,color);   //实心圆角矩形
+  clk.pushSprite(barX,barY);  //窗口位置
   clk.deleteSprite();
 }
-//温度图标显示函数（室外温度进度条）
+//湿度图标显示函数（室外湿度进度条）：0-100 等比映射到内框 50px，pct<0 画空条
+void humidityWin(int pct)
+{
+  drawLcdBar(L_HU_BAR_X, L_HU_BAR_Y, (pct < 0) ? 0 : pct / 2, humicol);
+}
+//温度图标显示函数（室外温度进度条）：tempnum 已在 weaterData() 里换算成 0-50 像素宽
 void tempWin()
 {
-  clk.setColorDepth(8);
-  
-  clk.createSprite(52, 6);  //创建窗口
-  clk.fillSprite(0x0000);    //填充率
-  clk.drawRoundRect(0,0,52,6,3,0xFFFF);  //空心圆角矩形  起始位x,y,长度，宽度，圆弧半径，颜色
-  clk.fillRoundRect(1,1,tempnum,4,2,tempcol);   //实心圆角矩形
-  clk.pushSprite(L_TI_BAR_X,L_TI_BAR_Y);  //窗口位置
-  clk.deleteSprite();
+  drawLcdBar(L_TI_BAR_X, L_TI_BAR_Y, tempnum, tempcol);
 }
 //web服务启动后LCD提示：内网访问地址（无mDNS，直接显示IP）
 void netShowStaWin()
@@ -493,6 +497,9 @@ void updateIpScroll()
   else
     scrollText[8] = "192.168.4.1";
 }
+/* *****************************************************************
+ *  串口调试命令（0x01-0x05）
+ * *****************************************************************/
 //串口调试设置函数
 void Serial_set()
 {
@@ -526,27 +533,13 @@ void Serial_set()
     } 
     if(SMOD=="0x02")//设置2地址设置
     {
-      int CityCODE = 0;
       int CityC = atoi(incomingByte.c_str());//int n = atoi(xxx.c_str());//String转int
-      if(CityC>=101000000 && CityC<=102000000 || CityC == 0)
+      if((CityC>=101000000 && CityC<=102000000) || CityC == 0)
       {
         saveCityCodetoEEP(&CityC);
-        // for(int cnum=0;cnum<5;cnum++)
-        // {
-        //   EEPROM.write(CC_addr+cnum,CityC%100);//城市地址写入城市代码
-        //   EEPROM.commit();//保存更改的数据
-        //   CityC = CityC/100;
-        //   delay(5);
-        // }
         readCityCodefromEEP(&CityC);
-        // for(int cnum=5;cnum>0;cnum--)
-        // {          
-        //   CityCODE = CityCODE*100;
-        //   CityCODE += EEPROM.read(CC_addr+cnum-1); 
-        //   delay(5);
-        // }
         
-        cityCode = CityCODE;
+        cityCode = String(CityC);//读回刚写入的值（原来误赋给了从未更新的 CityCODE）
         
         if(cityCode == "0")
         {
@@ -663,6 +656,8 @@ void applyLcdRotation(uint8_t r)
   TJpgDec.drawJpg(L_TI_ICON_X,L_TI_ICON_Y,temperature, sizeof(temperature));  //温度图标
   TJpgDec.drawJpg(L_HU_ICON_X,L_HU_ICON_Y,humidity, sizeof(humidity));  //湿度图标
 }
+//网页保存设置时可触发的后续动作（按位组合）
+#define SAVE_ACT_BRIGHT   (1 << 0)   //重设背光（亮度/夜间亮度/夜间时段变了）
 //web设置保存（亮度/方向/城市代码/城市名称/天气更新时间/分时段亮度）
 //任一字段越界时返回 {"ok":0,"err":"<字段>"}，网页据此给出具体提示，不再一句“保存失败”糊过去
 void handleSave()
@@ -672,101 +667,49 @@ void handleSave()
     server.send(400, "text/plain", "no args");
     return;
   }
+  //整型设置项一张表：加一个设置项只加一行，不再复制粘贴校验/写盘/触发三件事
+  struct IntField
+  {
+    const char *key;      //网页字段名，也是出错时返回给前端的错误码
+    int minV, maxV;       //允许范围（含端点）
+    int *pval;            //运行时变量
+    int *eeAddr;          //EEPROM 地址（值均 <256，存一个字节）
+    uint8_t act;          //改成功后要触发的动作，见 SAVE_ACT_*
+  };
+  static const IntField INT_FIELDS[] = {
+    {"bl",   1, 100, &LCD_BL_PWM,        &BL_addr,    SAVE_ACT_BRIGHT},
+    {"upt",  1,  60, &updateweater_time, &UpWeT_addr, 0},
+    {"tbl",  0,   1, &TBl_en,            &TBl_addr,   SAVE_ACT_BRIGHT},
+    {"nbl",  1, 100, &nightBl,           &NB_addr,    SAVE_ACT_BRIGHT},
+    {"nst",  0,  23, &nightStart,        &NS_addr,    SAVE_ACT_BRIGHT},
+    {"net",  0,  23, &nightEnd,          &NE_addr,    SAVE_ACT_BRIGHT},
+  };
+
   const char *err = NULL;   //首个越界字段，只报第一个
   bool refreshWeather = false;
   bool rotChanged = false;
   int newRot = LCD_Rotation;
+  uint8_t acts = 0;
 
-  if(server.hasArg("bl"))
+  for(const IntField &f : INT_FIELDS)
   {
-    int v = server.arg("bl").toInt();
-    if(v < 1 || v > 100) err = "bl";
-    else if(v != LCD_BL_PWM)
+    if(!server.hasArg(f.key)) continue;
+    int v = server.arg(f.key).toInt();
+    if(v < f.minV || v > f.maxV)
     {
-      LCD_BL_PWM = v;
-      EEPROM.write(BL_addr, LCD_BL_PWM);
-      EEPROM.commit();
-      timeBrightness();
-      Serial.printf("Web: bl=%d\r\n", LCD_BL_PWM);
+      if(!err) err = f.key;
+      continue;
     }
+    if(v == *f.pval) continue;          //没变就不写盘
+    *f.pval = v;
+    EEPROM.write(*f.eeAddr, (uint8_t)v);
+    EEPROM.commit();
+    acts |= f.act;
+    Serial.printf("Web: %s=%d\r\n", f.key, v);
   }
-  if(server.hasArg("upt"))
-  {
-    int v = server.arg("upt").toInt();
-    if(v < 1 || v > 60)
-    {
-      if(!err) err = "upt";
-    }
-    else if(v != updateweater_time)
-    {
-      updateweater_time = v;
-      EEPROM.write(UpWeT_addr, updateweater_time);
-      EEPROM.commit();
-      Serial.printf("Web: upt=%d\r\n", updateweater_time);
-    }
-  }
-  if(server.hasArg("tbl"))//分时段亮度开关
-  {
-    int e = server.arg("tbl").toInt();
-    if(e != 0 && e != 1)
-    {
-      if(!err) err = "tbl";
-    }
-    else if((uint8_t)e != TBl_en)
-    {
-      TBl_en = (uint8_t)e;
-      EEPROM.write(TBl_addr, TBl_en);
-      EEPROM.commit();
-      timeBrightness();
-      Serial.printf("Web: tbl=%d\r\n", TBl_en);
-    }
-  }
-  if(server.hasArg("nbl"))//夜间亮度
-  {
-    int v = server.arg("nbl").toInt();
-    if(v < 1 || v > 100)
-    {
-      if(!err) err = "nbl";
-    }
-    else if(v != nightBl)
-    {
-      nightBl = v;
-      EEPROM.write(NB_addr, nightBl);
-      EEPROM.commit();
-      timeBrightness();
-      Serial.printf("Web: nbl=%d\r\n", nightBl);
-    }
-  }
-  if(server.hasArg("nst"))//夜间开始小时
-  {
-    int v = server.arg("nst").toInt();
-    if(v < 0 || v > 23)
-    {
-      if(!err) err = "nst";
-    }
-    else if(v != nightStart)
-    {
-      nightStart = v;
-      EEPROM.write(NS_addr, nightStart);
-      EEPROM.commit();
-      timeBrightness();
-    }
-  }
-  if(server.hasArg("net"))//夜间结束小时
-  {
-    int v = server.arg("net").toInt();
-    if(v < 0 || v > 23)
-    {
-      if(!err) err = "net";
-    }
-    else if(v != nightEnd)
-    {
-      nightEnd = v;
-      EEPROM.write(NE_addr, nightEnd);
-      EEPROM.commit();
-      timeBrightness();
-    }
-  }
+
+  if(acts & SAVE_ACT_BRIGHT) timeBrightness();//亮度/夜间时段变化才重设背光
+
   if(server.hasArg("cc"))//城市代码：7 位数字且落在 weather.com.cn 的号段
   {
     int cc = server.arg("cc").toInt();
@@ -1060,13 +1003,30 @@ void handleCaptive()
   server.sendHeader("Location", "http://192.168.4.1/", true);
   server.send(302, "text/plain", "");
 }
-//设置主页：配网模式只给WiFi配网页；已联网模式给显示设置页（不再出现WiFi相关内容）
-void handleRoot()
+//分段发送整页：共用样式与脚本在 flash 里只存一份（见 webui.h），
+//逐段 sendContent_P 拷出去，不做运行时大 String 拼接
+static void sendPageParts(const SddPage &pg)
 {
   //禁缓存：升级后浏览器不必手动强刷才能看到新页面
   server.sendHeader("Cache-Control", "no-store, must-revalidate");
-  server.send_P(200, "text/html; charset=utf-8",
-                (netMode == NET_STA) ? SDD_PAGE : SDD_PAGE_AP);
+  server.setContentLength(CONTENT_LENGTH_UNKNOWN);
+  server.send(200, "text/html; charset=utf-8", "");
+  server.sendContent_P(pg.head);
+  server.sendContent_P(PSTR("<style>"));
+  server.sendContent_P(SDD_CSS);
+  server.sendContent_P(pg.css);
+  server.sendContent_P(PSTR("</style></head><body>"));
+  server.sendContent_P(pg.body);
+  server.sendContent_P(SDD_TOAST);
+  server.sendContent_P(PSTR("<script>"));
+  server.sendContent_P(SDD_JS_LIB);
+  server.sendContent_P(pg.js);
+  server.sendContent_P(PSTR("</script></body></html>"));
+}
+//设置主页：配网模式只给WiFi配网页；已联网模式给显示设置页（不再出现WiFi相关内容）
+void handleRoot()
+{
+  sendPageParts((netMode == NET_STA) ? SDD_PAGE_STA : SDD_PAGE_AP);
 }
 //404
 void handleNotFound()
@@ -1244,6 +1204,9 @@ static void blFadeOn(int pct)
   }
   blSet(target);
 }
+/* *****************************************************************
+ *  上电流程与主循环
+ * *****************************************************************/
 void setup()
 {
   //上电第一件事必须是关背光：面板此刻显存为随机值，背光早亮就是一屏雪花
@@ -1336,13 +1299,13 @@ void LCD_reflash(int en)
   }
   
   //两秒钟更新一次滚动信息
-  if(second()%2 ==0&& prevTime == 0 || en == 1){
+  if((second()%2 == 0 && prevTime == 0) || en == 1){
     scrollBanner();
   }
 #if imgAst_EN
   imgAnim();//太空人动画常驻
 #endif
-  if(millis() - weaterTime > (60000*updateweater_time) || en == 1 || UpdateWeater_en != 0){ //按设置间隔更新天气
+  if(millis() - weaterTime > ((uint32_t)60000 * updateweater_time) || en == 1 || UpdateWeater_en != 0){ //按设置间隔更新天气
     if(Wifi_en == 0)
     {
       WiFi.forceSleepWake();//wifi on
@@ -1383,7 +1346,6 @@ void getCityCode(){
     int aa = str.indexOf("id=");
     if(aa>-1)
     {
-       //cityCode = str.substring(aa+4,aa+4+9).toInt();
        cityCode = str.substring(aa+4,aa+4+9);
        Serial.println(cityCode); 
        getCityWeater();
@@ -1467,6 +1429,9 @@ void fetchSunTimes()
   }
   httpClient.end();
 }
+/* *****************************************************************
+ *  天气：抓取与解析
+ * *****************************************************************/
 // 获取城市天气
 void getCityWeater(){
  //String URL = "http://d1.weather.com.cn/dingzhi/" + cityCode + ".html?_="+String(now());//新
@@ -1491,16 +1456,13 @@ void getCityWeater(){
     int indexStart = str.indexOf("weatherinfo\":");
     int indexEnd = str.indexOf("};var alarmDZ");
     String jsonCityDZ = str.substring(indexStart+13,indexEnd);
-    //Serial.println(jsonCityDZ);
     indexStart = str.indexOf("dataSK =");
     indexEnd = str.indexOf(";var dataZS");
     String jsonDataSK = str.substring(indexStart+8,indexEnd);
-    //Serial.println(jsonDataSK);
     
     indexStart = str.indexOf("\"f\":[");
     indexEnd = str.indexOf(",{\"fa");
     String jsonFC = str.substring(indexStart+5,indexEnd);
-    //Serial.println(jsonFC);
     
     fetchSunTimes();//日出日落单取一次，随后由 weaterData 写进滚动条
     weaterData(&jsonCityDZ,&jsonDataSK,&jsonFC);
@@ -1517,6 +1479,9 @@ void getCityWeater(){
   httpClient.end();
 }
 String scrollText[9];//天气信息存储（0今日 1日出 2日落 3风 4最低 5最高 6湿度 7备用 8IP）
+/* *****************************************************************
+ *  天气：写屏与滚动字幕
+ * *****************************************************************/
 //天气信息写到屏幕上
 void weaterData(String *cityDZ,String *dataSK,String *dataFC)
 {
@@ -1524,7 +1489,6 @@ void weaterData(String *cityDZ,String *dataSK,String *dataFC)
   DynamicJsonDocument doc(1024);
   deserializeJson(doc, *dataSK);
   JsonObject sk = doc.as<JsonObject>();
-  //TFT_eSprite clkb = TFT_eSprite(&tft);
   
   /***绘制相关文字***/
   clk.setColorDepth(8);
@@ -1617,7 +1581,6 @@ void weaterData(String *cityDZ,String *dataSK,String *dataFC)
   clk.deleteSprite();
   
   //左上角滚动字幕内容在解析完预报JSON后统一填充（见下方）
-  //scrollText[6] = atoi((sk["weathercode"].as<String>()).substring(1,3).c_str()) ;
   //天气图标
   {
     int wcode = atoi((sk["weathercode"].as<String>()).substring(1,3).c_str());
@@ -1675,8 +1638,6 @@ void weaterData(String *cityDZ,String *dataSK,String *dataFC)
   clk.pushSprite(L_TODAY_X,L_TODAY_Y);
   clk.deleteSprite();
   
-  //Serial.println(scrollText[0]);
-  //Serial.println(scrollText[0]);
   
   clk.unloadFont();
 }
@@ -1844,6 +1805,9 @@ void digitalClockDisplay(int reflash_en)
   /***日期****/
 }
 //星期
+/* *****************************************************************
+ *  日期、农历与 NTP 时间
+ * *****************************************************************/
 String week()
 {
   String wk[7] = {"日","一","二","三","四","五","六"};
@@ -1960,12 +1924,8 @@ time_t getNtpTime()
 {
   IPAddress ntpServerIP; // NTP server's ip address
   while (Udp.parsePacket() > 0) ; // discard any previously received packets
-  //Serial.println("Transmit NTP Request");
   // get a random server from the pool
   WiFi.hostByName(ntpServerName, ntpServerIP);
-  //Serial.print(ntpServerName);
-  //Serial.print(": ");
-  //Serial.println(ntpServerIP);
   sendNTPpacket(ntpServerIP);
   uint32_t beginWait = millis();
   while (millis() - beginWait < 1500) {
@@ -1979,7 +1939,6 @@ time_t getNtpTime()
       secsSince1900 |= (unsigned long)packetBuffer[41] << 16;
       secsSince1900 |= (unsigned long)packetBuffer[42] << 8;
       secsSince1900 |= (unsigned long)packetBuffer[43];
-      //Serial.println(secsSince1900 - 2208988800UL + timeZone * SECS_PER_HOUR);
       return secsSince1900 - 2208988800UL + timeZone * SECS_PER_HOUR;
     }
   }
