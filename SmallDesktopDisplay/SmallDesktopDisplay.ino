@@ -40,6 +40,12 @@
  *                    现在按 5 台服务器依次重试并校验回包（模式/层数/时间戳/值域）；
  *                    天气请求成功后借回包的 Date 头兜底校正（UDP 123 被封也能对时）；
  *                    /api/status 与状态卡显示设备时间、对时方式与上次对时距今。
+ *            V2.6    修 V2.5 的对时回归（两块表全都不准）：
+ *                    ① 回包校验拿 originate 比了 transmit —— 同一包里两个不同时间戳，永远不相等，
+ *                       每个 NTP 回包都被判非法丢弃；改为比「我们发出去的 transmit」。
+ *                    ② HTTP 兜底里 header("Date") 没先 collectHeaders()，核心库此时不保存响应头，
+ *                       永远返回空串，兜底从未生效；已在 GET 前声明收集。
+ *                    另：严格校验全挂时允许用「时间值合理、仅时间戳对不上」的包兜底，避免再次整机不对时。
  *
  * 文 件 结 构（按顺序）：
  *   库文件/配置位/屏幕坐标/字库 → 参数与状态变量 → EEPROM 存取 → 屏幕绘制
@@ -54,7 +60,7 @@
  * 
  *    感谢群友 @你别失望  提醒发现WiFi保存后无法重置的问题，目前已解决。详情查看更改说明！
  * *****************************************************************/
-#define Version  "SDD V2.5"
+#define Version  "SDD V2.6"
 /* *****************************************************************
  *  库文件、头文件
  * *****************************************************************/
@@ -258,7 +264,8 @@ static const char *const NTP_SERVERS[] = {
   "ntp6.aliyun.com", "ntp.aliyun.com", "cn.pool.ntp.org", "time.cloudflare.com", "pool.ntp.org"
 };
 const uint8_t NTP_SERVER_N = sizeof(NTP_SERVERS) / sizeof(NTP_SERVERS[0]);
-uint8_t ntpSrvIdx = 0;      //下一轮从哪台开始试（成功过的那台下次优先）
+uint8_t  ntpSrvIdx = 0;      //下一轮从哪台开始试（成功过的那台下次优先）
+uint32_t ntpTxId = 0;       //本次请求的 transmit 时间戳：服务器会原样抄进回包的 originate
 const int timeZone = 8;     //东八区
 //对时状态（供 /api/status 排查“两块表差几分钟”这类问题）
 uint32_t clkOkAt   = 0;     //最近一次对时成功的 millis，0=本次开机还没成功过
@@ -1478,6 +1485,9 @@ void getCityWeater(){
   //设置请求头中的User-Agent
   httpClient.setUserAgent("Mozilla/5.0 (iPhone; CPU iPhone OS 11_0 like Mac OS X) AppleWebKit/604.1.38 (KHTML, like Gecko) Version/11.0 Mobile/15A372 Safari/604.1");
   httpClient.addHeader("Referer", "http://www.weather.com.cn/");
+  //HTTPClient 默认不保存响应头；不先声明，header("Date") 永远返回空串（对时兜底就拿不到时间）
+  static const char *CLK_HDRS[] = { "Date" };
+  httpClient.collectHeaders(CLK_HDRS, 1);
  
   //启动连接并发送HTTP请求
   int httpCode = httpClient.GET();
@@ -1499,10 +1509,11 @@ void getCityWeater(){
     String jsonFC = str.substring(indexStart+5,indexEnd);
     
     //对时兜底：NTP 不通时（路由器/运营商封 UDP 123 很常见）借这封回包的 Date 头把钟对正
-    if(timeStatus() != timeSet || (millis() - clkOkAt) > 6UL * 3600UL * 1000UL || clkOkAt == 0)
+    if(timeStatus() != timeSet || clkOkAt == 0 || (millis() - clkOkAt) > 6UL * 3600UL * 1000UL)
     {
-      String dh = httpClient.header("Date");
+      String dh = httpClient.header("Date");//前提：GET 之前已 collectHeaders（见下方）
       if(dh.length()) clockFixFromHttp(dh, 2);
+      else Serial.println("对时(HTTP): 回包无 Date 头，跳过");
     }
     fetchSunTimes();//日出日落单取一次，随后由 weaterData 写进滚动条
     weaterData(&jsonCityDZ,&jsonDataSK,&jsonFC);
@@ -2000,8 +2011,32 @@ static void clockFixFromHttp(const String &dateHdr, uint8_t via)
 /*-------- NTP code ----------*/
 const int NTP_PACKET_SIZE = 48; // NTP时间在消息的前48字节中
 byte packetBuffer[NTP_PACKET_SIZE]; //buffer to hold incoming & outgoing packets
-// 单台服务器问一次：成功返回本地时间秒数，失败记下原因并返回 0
-static time_t ntpQuery(const char *host, uint32_t timeoutMs)
+// 校验回包并取出时间：严格通过返回 true（模式/层数/时间戳/值域全过）；
+// 只有时间戳对不上时把结果写进 loose 并返回 false，交给调用方在全都不严格时兜底
+static bool ntpParseReply(const uint8_t *pkt, time_t *out, time_t *loose)
+{
+  uint8_t mode = pkt[0] & 0x07;
+  uint8_t stratum = pkt[1];
+  if(mode != 4 || stratum == 0 || stratum > 15) return false;
+  uint32_t secs = ((uint32_t)pkt[40] << 24) | ((uint32_t)pkt[41] << 16) |
+                  ((uint32_t)pkt[42] << 8)  |  (uint32_t)pkt[43];
+  time_t t = (time_t)(secs - 2208988800UL + timeZone * SECS_PER_HOUR);
+  if(t < 1577836800UL || t > 4102444800UL) return false;//早于2020年，包有问题
+  //originate(24..31) 必须等于我们发出去的 transmit(40..47)——服务器原样抄回
+  uint32_t orig = ((uint32_t)pkt[24] << 24) | ((uint32_t)pkt[25] << 16) |
+                  ((uint32_t)pkt[26] << 8)  |  (uint32_t)pkt[27];
+  uint32_t origLo = ((uint32_t)pkt[28] << 24) | ((uint32_t)pkt[29] << 16) |
+                    ((uint32_t)pkt[30] << 8)  |  (uint32_t)pkt[31];
+  if(orig != ntpTxId || origLo != 0)
+  {
+    if(loose) *loose = t;//时间值本身合理，先留着，万一严格校验全挂还能用
+    return false;
+  }
+  *out = t;
+  return true;
+}
+// 单台服务器问一次：严格成功返回时间；只有宽松候选时返回 0（记在 looseOut）
+static time_t ntpQuery(const char *host, uint32_t timeoutMs, time_t *looseOut)
 {
   IPAddress ip;
   if(!WiFi.hostByName(host, ip, 2000) || ip == IPAddress((uint32_t)0))
@@ -2018,43 +2053,22 @@ static time_t ntpQuery(const char *host, uint32_t timeoutMs)
     if(Udp.parsePacket() >= NTP_PACKET_SIZE)
     {
       Udp.read(packetBuffer, NTP_PACKET_SIZE);
-      //校验：模式=server(4)、层数 1-15、回包的 originate 等于我们发的 transmit
-      uint8_t mode = packetBuffer[0] & 0x07;
-      uint8_t stratum = packetBuffer[1];
-      if(mode != 4 || stratum == 0 || stratum > 15)
+      time_t t = 0, loose = 0;
+      if(ntpParseReply(packetBuffer, &t, &loose))
       {
-        ntpErr = 3;
-        Serial.printf("NTP: %s 回包不合法(mode=%u stratum=%u)\r\n", host, mode, stratum);
-        continue;
+        ntpSrvIp = ip.toString();
+        ntpErr = 0;
+        if(clkSnap) clkOffset = (int32_t)((long)t - (long)clkSnap);
+        clkOkAt = millis();
+        clkVia = 1;
+        Serial.printf("NTP: %s 成功 偏移 %+lds\r\n", ntpSrvIp.c_str(), (long)clkOffset);
+        return t;
       }
-      bool origOk = true;
-      for(uint8_t i = 0; i < 8; i++)
-        if(packetBuffer[24 + i] != packetBuffer[40 + i]) { origOk = false; break; }
-      if(!origOk)
-      {
-        ntpErr = 3;
-        Serial.printf("NTP: %s 回包时间戳对不上（可能是伪造/错包）\r\n", host);
-        continue;
-      }
-      unsigned long secs = ((unsigned long)packetBuffer[40] << 24) |
-                           ((unsigned long)packetBuffer[41] << 16) |
-                           ((unsigned long)packetBuffer[42] << 8)  |
-                            (unsigned long)packetBuffer[43];
-      time_t t = (time_t)(secs - 2208988800UL + timeZone * SECS_PER_HOUR);
-      //值域校验：早于 2020 年说明包有问题，宁可不用
-      if(t < 1577836800UL || t > 4102444800UL)
-      {
-        ntpErr = 3;
-        Serial.printf("NTP: %s 时间值不合理(%lu)\r\n", host, (unsigned long)t);
-        continue;
-      }
-      ntpSrvIp = ip.toString();
-      ntpErr = 0;
-      if(clkSnap) clkOffset = (int32_t)((long)t - (long)clkSnap);
-      clkOkAt = millis();
-      clkVia = 1;
-      Serial.printf("NTP: %s 成功 偏移 %+lds\r\n", ntpSrvIp.c_str(), (long)clkOffset);
-      return t;
+      if(loose && looseOut) *looseOut = loose;
+      ntpErr = 3;
+      Serial.printf("NTP: %s 回包未通过校验(mode=%u stratum=%u tx=%08lx)\r\n",
+                    host, packetBuffer[0] & 7, packetBuffer[1], (unsigned long)ntpTxId);
+      continue;
     }
   }
   ntpErr = 2;//无响应
@@ -2064,15 +2078,27 @@ static time_t ntpQuery(const char *host, uint32_t timeoutMs)
 time_t getNtpTime()
 {
   //依次试各家服务器；成功的那台下次优先，避免每次都在坏掉的域名上白等
+  time_t loose = 0;
   for(uint8_t k = 0; k < NTP_SERVER_N; k++)
   {
     uint8_t idx = (ntpSrvIdx + k) % NTP_SERVER_N;
-    time_t t = ntpQuery(NTP_SERVERS[idx], 1200);
+    time_t t = ntpQuery(NTP_SERVERS[idx], 1200, &loose);
     if(t)
     {
       ntpSrvIdx = idx;
       return t;
     }
+  }
+  //严格校验全挂但拿到过“时间值合理、只有时间戳对不上”的包（NAT 改写、老设备等）：
+  //宁可先对上时间，也不要让钟一直走晶振——这类包要伪造，还得知道我们请求里的随机值
+  if(loose && timeZone * SECS_PER_HOUR + (time_t)loose > 0)
+  {
+    Serial.println("NTP: 仅宽松校验通过，先用于对时");
+    ntpErr = 4;
+    if(clkSnap) clkOffset = (int32_t)((long)loose - (long)clkSnap);
+    clkOkAt = millis();
+    clkVia = 1;
+    return loose;
   }
   Serial.println("No NTP Response :-(");
   return 0;//全部失败返回 0，TimeLib 会在下一个同步周期再试
@@ -2093,13 +2119,13 @@ void sendNTPpacket(IPAddress &address)
   packetBuffer[13] = 0x4E;
   packetBuffer[14] = 49;
   packetBuffer[15] = 52;
-  // transmit 时间戳填一个会变化的值（毫秒数），服务器会原样抄进 originate 字段，
-  // 回包时用来确认「这个包确实是回给我的」，顺手挡掉错包/伪造包
-  uint32_t tx = millis() ^ 0x5A5AA5A5UL;
-  packetBuffer[40] = (tx >> 24) & 0xFF;
-  packetBuffer[41] = (tx >> 16) & 0xFF;
-  packetBuffer[42] = (tx >> 8) & 0xFF;
-  packetBuffer[43] = tx & 0xFF;
+  // transmit 时间戳填一个会变化的值，服务器会把它原样抄进回包的 originate 字段（24..31），
+  // 回包时拿它确认「这包确实是回给我的」，顺手挡掉错包/伪造包
+  ntpTxId = millis() ^ 0x5A5AA5A5UL;
+  packetBuffer[40] = (ntpTxId >> 24) & 0xFF;
+  packetBuffer[41] = (ntpTxId >> 16) & 0xFF;
+  packetBuffer[42] = (ntpTxId >> 8) & 0xFF;
+  packetBuffer[43] = ntpTxId & 0xFF;
   // all NTP fields have been given values, now
   // you can send a packet requesting a timestamp:
   Udp.beginPacket(address, 123); //NTP requests are to port 123

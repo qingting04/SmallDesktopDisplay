@@ -124,7 +124,7 @@ static const char SDD_TOAST[] PROGMEM = "<div class=\"toast\" id=\"tst\"></div>"
 
 /*---------------- AP 配网页 ----------------*/
 static const char SDD_BODY_AP[] PROGMEM = R"html(
-<h1>SDD 桌面显示器<small id="ver">V2.5</small></h1>
+<h1>SDD 桌面显示器<small id="ver">V2.6</small></h1>
 <div class="card"><div class="t">设备状态</div><div id="st" class="dim">状态加载中…</div></div>
 <div class="card"><div class="t">WiFi 配网</div>
 <div class="dim" style="margin-bottom:6px">当前为配网模式：选择或输入家里WiFi，保存后设备重启并自动连接。</div>
@@ -169,7 +169,7 @@ setInterval(refresh,8000);
 
 /*---------------- 已联网设置页 ----------------*/
 static const char SDD_BODY_STA[] PROGMEM = R"html(
-<h1>SDD 桌面显示器<small id="ver">V2.5</small></h1>
+<h1>SDD 桌面显示器<small id="ver">V2.6</small></h1>
 <div class="card"><div class="t">设备状态</div><div id="st" class="dim">状态加载中…</div></div>
 <div class="card"><div class="t">显示设置</div>
 <div class="row"><span class="lab">亮度·白天</span><input id="bl" type="range" min="1" max="100" onchange="saveCfg()"><span id="blv" style="width:40px"></span></div>
