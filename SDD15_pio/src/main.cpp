@@ -47,6 +47,11 @@
  *                    ② HTTP 兜底里 header("Date") 没先 collectHeaders()，核心库此时不保存响应头，
  *                       永远返回空串，兜底从未生效；已在 GET 前声明收集。
  *                    另：严格校验全挂时允许用「时间值合理、仅时间戳对不上」的包兜底，避免再次整机不对时。
+ *            V2.7    修“下雨却显示扬沙”：实况编码 d301（雨）/d302（雪）是三位数，
+ *                    旧代码 atoi(substring(1,3)) 固定取两位，把 301 截成 30 —— 而 30 是扬沙，
+ *                    于是下雨下雪天都画成沙尘暴。改为取字母后的整串数字（1~3 位都支持），
+ *                    解析不出数字时用“未知”图标而不是冒充晴天；
+ *                    /api/status 与状态卡增加实况编码/文字，图标不符时可直接核对。
  *
  * 文 件 结 构（按顺序）：
  *   库文件/配置位/屏幕坐标/字库 → 参数与状态变量 → EEPROM 存取 → 屏幕绘制
@@ -61,7 +66,7 @@
  * 
  *    感谢群友 @你别失望  提醒发现WiFi保存后无法重置的问题，目前已解决。详情查看更改说明！
  * *****************************************************************/
-#define Version  "SDD V2.6"
+#define Version  "SDD V2.7"
 /* *****************************************************************
  *  库文件、头文件
  * *****************************************************************/
@@ -275,6 +280,8 @@ uint8_t  clkVia    = 0;     //最近一次成功的来源：1=NTP 2=HTTP 3=串�
 uint8_t  ntpErr    = 0;     //最近一次 NTP 失败原因：1=域名解析失败 2=无响应 3=回包不合法
 int32_t  clkOffset = 0;     //最近一次对时把钟往前(+)/往后(-)拨了多少秒
 String   ntpSrvIp  = "";    //最近一次成功用的服务器 IP
+String   wxCodeStr = "";    //最近一次实况编码原文（如 d301），排查图标不符时看这个
+String   wxTextStr = "";    //最近一次实况文字（如 雨）
 //wifi连接UDP设置参数
 WiFiUDP Udp;
 WiFiClient wificlient;
@@ -302,6 +309,7 @@ void getCityWeater();
 void fetchSunTimes();
 String tempOneDecimal(const String &raw);
 int  humFromString(const String &raw);
+int  wxCodeFromString(const String &raw);
 void humidityWin(int pct);
 void weaterData(String *cityDZ,String *dataSK,String *dataFC);
 void scrollBanner();
@@ -819,8 +827,8 @@ void handleSaveWifi()
 //设备状态JSON
 void handleStatus()
 {
-  //字段已有 32 个，文档与输出缓冲都放静态区：放栈上会吃掉近 3KB，Web 处理时栈不够
-  static StaticJsonDocument<1280> doc;
+  //字段已有 38 个，文档与输出缓冲都放静态区：放栈上会吃掉近 3KB，Web 处理时栈不够
+  static StaticJsonDocument<1536> doc;
   doc["mode"] = (netMode == NET_STA) ? 0 : 1;
   doc["ip"]   = (netMode == NET_STA) ? WiFi.localIP().toString() : WiFi.softAPIP().toString();
   doc["mac"]  = WiFi.macAddress();
@@ -858,6 +866,9 @@ void handleStatus()
   doc["toff"]  = clkOffset;                                   //上次对时拨了多少秒
   doc["tnrp"]  = ntpErr;                                      //最近一次 NTP 失败原因
   doc["tsrv"]  = ntpSrvIp;
+  doc["wxCode"]= wxCodeStr;                                   //实况编码原文，如 d301
+  doc["wxIcon"]= wxCodeFromString(wxCodeStr);                  //解析出的图标编号
+  doc["wxText"]= wxTextStr;                                    //实况文字
   doc["temp"]  = wxTempTxt;//屏幕上的温度读数
   doc["hum"]   = (huminum < 0) ? String("-") : (String(huminum) + "%");//屏幕上的湿度读数
   static char buf[1152];
@@ -1420,6 +1431,27 @@ String tempOneDecimal(const String &raw)
   if(fp.length() == 0) fp = "0";
   return ip + "." + fp.substring(0, 1);
 }
+//天气实况编码解析：形如 d301 / n07 / d8 / d00 —— 字母后可能 1~3 位数字，必须全取。
+//旧代码固定取 substring(1,3) 两位，"d301"（雨）被截成 "30"（扬沙），
+//于是下雨下雪都画成沙尘暴——这就是“明明下雨却显示扬沙”的原因。
+//解析不出数字时返回 99（未知图标），不再默认成 0（晴）。
+int wxCodeFromString(const String &raw)
+{
+  int v = -1;
+  for(size_t i = 0; i < raw.length(); i++)
+  {
+    char c = raw[i];
+    if(c >= '0' && c <= '9')
+    {
+      if(v < 0) v = 0;
+      v = v * 10 + (c - '0');
+      if(v > 999) break;//三位封顶
+    }
+    else if(v >= 0)
+      break;//数字串结束（d301 → 301）
+  }
+  return (v < 0) ? 99 : v;
+}
 //湿度接口给的是 "93%" 这种带单位的字符串，取前面的整数并限制在 0-100；
 //认不出数字返回 -1（屏幕显示 "--"、条形画空），不再让 "100%" 被截成 10 这种错值
 int humFromString(const String &raw)
@@ -1635,7 +1667,11 @@ void weaterData(String *cityDZ,String *dataSK,String *dataFC)
   //左上角滚动字幕内容在解析完预报JSON后统一填充（见下方）
   //天气图标
   {
-    int wcode = atoi((sk["weathercode"].as<String>()).substring(1,3).c_str());
+    String wxCodeRaw = sk["weathercode"].as<String>();
+    int wcode = wxCodeFromString(wxCodeRaw);//d301 → 301，别再截成 30
+    wxCodeStr = wxCodeRaw;
+    wxTextStr = sk["weather"].as<String>();
+    Serial.printf("天气实况: %s 编码 %s → %d\r\n", wxTextStr.c_str(), wxCodeRaw.c_str(), wcode);
     bool drawn = false;
 #if UI_THEME
     if(fsOk)
