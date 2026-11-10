@@ -70,13 +70,14 @@ async function req(u,opt){var c=new AbortController();var to=setTimeout(function
 function upTxt(s){return Math.floor(s.up/3600)+'时'+Math.floor(s.up%3600/60)+'分'}
 function wxTxt(s){return (s.wxAge===4294967295)?'从未成功':(s.wxAge<120?s.wxAge+' 秒前':(s.wxAge<7200?Math.floor(s.wxAge/60)+' 分钟前':Math.floor(s.wxAge/3600)+' 小时前'))}
 function wxRow(s){return ['天气更新',wxTxt(s)+(s.wxErr?'（上次HTTP '+s.wxErr+'）':'')]}
+function wxLine(s){var v=s.wxText||'-';if(s.wxCode)v+='（'+s.wxCode+'）';if(s.station)v+=' · '+s.station;if(s.obs)v+=' · '+s.obs;return v}
 function clkTxt(s){
 if(!s.tset)return '未对时'+(s.tnrp?('（NTP 错误 '+s.tnrp+'）'):'');
 var v=(s.tvia==2?'HTTP对时':(s.tvia==3?'手动对时':'NTP对时'));
 if(s.tage===4294967295)return v;
 return v+' '+(s.tage<120?s.tage+' 秒前':(s.tage<7200?Math.floor(s.tage/60)+' 分钟前':Math.floor(s.tage/3600)+' 小时前'));
 }
-function kvMid(s){return [['运行时长',upTxt(s)],['固件版本',s.ver],['设备时间',s.time||'-'],['对时',clkTxt(s)],wxRow(s),['天气读数',(s.temp||'-')+' / '+(s.hum||'-')],['实况天气',(s.wxText||'-')+(s.wxCode?'（'+s.wxCode+'）':'')]]}
+function kvMid(s){return [['运行时长',upTxt(s)],['固件版本',s.ver],['设备时间',s.time||'-'],['对时',clkTxt(s)],wxRow(s),['天气读数',(s.temp||'-')+' / '+(s.hum||'-')],['实况天气',wxLine(s)]]}
 function kvMem(s){return [['可用内存',Math.round(s.heap/1024)+' KB（碎片 '+s.frag+'%）'],['Flash',s.flash+' KB，固件 '+s.sketch+' KB']]}
 function kvHtml(rows){var h='';for(var i=0;i<rows.length;i++)h+='<div class="kv"><span>'+rows[i][0]+'</span><span>'+rows[i][1]+'</span></div>';return h}
 async function baseRefresh(rowsFn){
@@ -124,7 +125,7 @@ static const char SDD_TOAST[] PROGMEM = "<div class=\"toast\" id=\"tst\"></div>"
 
 /*---------------- AP 配网页 ----------------*/
 static const char SDD_BODY_AP[] PROGMEM = R"html(
-<h1>SDD 桌面显示器<small id="ver">V2.7</small></h1>
+<h1>SDD 桌面显示器<small id="ver">V2.8</small></h1>
 <div class="card"><div class="t">设备状态</div><div id="st" class="dim">状态加载中…</div></div>
 <div class="card"><div class="t">WiFi 配网</div>
 <div class="dim" style="margin-bottom:6px">当前为配网模式：选择或输入家里WiFi，保存后设备重启并自动连接。</div>
@@ -169,7 +170,7 @@ setInterval(refresh,8000);
 
 /*---------------- 已联网设置页 ----------------*/
 static const char SDD_BODY_STA[] PROGMEM = R"html(
-<h1>SDD 桌面显示器<small id="ver">V2.7</small></h1>
+<h1>SDD 桌面显示器<small id="ver">V2.8</small></h1>
 <div class="card"><div class="t">设备状态</div><div id="st" class="dim">状态加载中…</div></div>
 <div class="card"><div class="t">显示设置</div>
 <div class="row"><span class="lab">亮度·白天</span><input id="bl" type="range" min="1" max="100" onchange="saveCfg()"><span id="blv" style="width:40px"></span></div>

@@ -51,6 +51,8 @@
  *                    于是下雨下雪天都画成沙尘暴。改为取字母后的整串数字（1~3 位都支持），
  *                    解析不出数字时用“未知”图标而不是冒充晴天；
  *                    /api/status 与状态卡增加实况编码/文字，图标不符时可直接核对。
+ *            V2.8    状态卡补「接口站名 + 观测时刻」：城市码指错区（各区站不同）或数据滞后时，
+ *                    屏幕上设了自定义城市名就完全看不出来。实况那行现显示“雾（d18）· 江岸 · 22:45”。
  *
  * 文 件 结 构（按顺序）：
  *   库文件/配置位/屏幕坐标/字库 → 参数与状态变量 → EEPROM 存取 → 屏幕绘制
@@ -65,7 +67,7 @@
  * 
  *    感谢群友 @你别失望  提醒发现WiFi保存后无法重置的问题，目前已解决。详情查看更改说明！
  * *****************************************************************/
-#define Version  "SDD V2.7"
+#define Version  "SDD V2.8"
 /* *****************************************************************
  *  库文件、头文件
  * *****************************************************************/
@@ -281,6 +283,9 @@ int32_t  clkOffset = 0;     //最近一次对时把钟往前(+)/往后(-)拨了�
 String   ntpSrvIp  = "";    //最近一次成功用的服务器 IP
 String   wxCodeStr = "";    //最近一次实况编码原文（如 d301），排查图标不符时看这个
 String   wxTextStr = "";    //最近一次实况文字（如 雨）
+String   wxStation = "";    //接口返回的站名（如 江岸）；与自定义城市名不同，用于核对城市码是否指对
+String   wxObsTime = "";    //接口给的数据时刻（如 22:45）
+String   wxSdRaw   = "";    //原始湿度字符串（如 100%）
 //wifi连接UDP设置参数
 WiFiUDP Udp;
 WiFiClient wificlient;
@@ -868,6 +873,9 @@ void handleStatus()
   doc["wxCode"]= wxCodeStr;                                   //实况编码原文，如 d301
   doc["wxIcon"]= wxCodeFromString(wxCodeStr);                  //解析出的图标编号
   doc["wxText"]= wxTextStr;                                    //实况文字
+  doc["station"]=wxStation;                                    //接口站名（核对城市码用）
+  doc["obs"]    =wxObsTime;                                    //接口数据时刻
+  doc["wxSD"]   =wxSdRaw;                                      //原始湿度字符串
   doc["temp"]  = wxTempTxt;//屏幕上的温度读数
   doc["hum"]   = (huminum < 0) ? String("-") : (String(huminum) + "%");//屏幕上的湿度读数
   static char buf[1152];
@@ -1609,6 +1617,7 @@ void weaterData(String *cityDZ,String *dataSK,String *dataFC)
   //湿度（接口给 "93%" 这种；个别城市只回小写 sd，或干脆没有该字段）
   String humRaw = sk["SD"].as<String>();
   if(humRaw.length() == 0 || humRaw == "null") humRaw = sk["sd"].as<String>();
+  wxSdRaw = humRaw;
   huminum = humFromString(humRaw);
   clk.createSprite(L_VAL_W, 24); 
   clk.fillSprite(bgColor);
@@ -1670,6 +1679,8 @@ void weaterData(String *cityDZ,String *dataSK,String *dataFC)
     int wcode = wxCodeFromString(wxCodeRaw);//d301 → 301，别再截成 30
     wxCodeStr = wxCodeRaw;
     wxTextStr = sk["weather"].as<String>();
+    wxStation = sk["cityname"].as<String>();
+    wxObsTime = sk["time"].as<String>();
     Serial.printf("天气实况: %s 编码 %s → %d\r\n", wxTextStr.c_str(), wxCodeRaw.c_str(), wcode);
     bool drawn = false;
 #if UI_THEME
